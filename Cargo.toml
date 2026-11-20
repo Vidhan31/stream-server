@@ -8,8 +8,9 @@ members = [
     "bindings/async-sevenz",
     "stremio-runtime-stub",
     "updater-helper",
-    "settings-gui",
 ]
+exclude = ["settings-gui"]
+default-members = ["server"]
 
 [profile.release]
 opt-level = "z"

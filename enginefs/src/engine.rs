@@ -204,7 +204,7 @@ impl<H: TorrentHandle> Engine<H> {
 
     pub fn find_file_by_regex(&self, regex_str: &str) -> Option<usize> {
         let _re = Regex::new(regex_str).ok()?;
-        // This is tricky now as find_file_by_regex was librqbit specific.
+        // Backend-specific metainfo lookup belongs in the backend layer.
         // For now, we'll assume we can list files.
         None
     }

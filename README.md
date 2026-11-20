@@ -47,9 +47,9 @@ Stream Server is a **fully open-source** replacement for Stremio's proprietary `
 ## ✨ Features
 
 ### Core Streaming
-- **🚀 High Performance**: Native Rust with optional C++ libtorrent backend
+- **🚀 High Performance**: Native Rust with the C++ libtorrent backend
 - **📺 HLS Transcoding**: Real-time video transcoding via FFmpeg (master.m3u8, stream.m3u8)
-- **🔧 Multiple Backends**: `librqbit` (pure Rust) or `libtorrent` (battle-tested C++)
+- **🌐 Torrent Engine**: libtorrent-rasterbar with DHT, peer exchange, and piece deadlines
 - **📡 HTTP Range Requests**: Full support for instant seeking
 
 ### Media Support
@@ -87,11 +87,8 @@ Download from [Releases](https://github.com/perpetus/stream-server/releases):
 ### Build from Source
 
 ```bash
-# Default build (librqbit - recommended)
+# Build the headless server with its libtorrent backend
 cargo build --release
-
-# With libtorrent backend (advanced)
-cargo build --release --features libtorrent --no-default-features
 ```
 
 ---
@@ -193,17 +190,9 @@ prebuilt Skia binaries.
 
 ---
 
-## 📊 Backend Comparison
+## 📊 Torrent Engine
 
-| Feature | librqbit | libtorrent |
-|---------|----------|------------|
-| **Language** | Pure Rust | C++ via FFI |
-| **Binary Size** | Smaller | Larger |
-| **Maturity** | Newer | Battle-tested |
-| **DHT** | ✅ | ✅ |
-| **uTP** | ✅ | ✅ |
-| **Piece Deadline** | ❌ | ✅ |
-| **Windows Setup** | ✅ Easy | ⚠️ Complex |
+The server uses libtorrent-rasterbar through its C++ FFI bindings. Native Linux builds need libtorrent development files available through `pkg-config`; the prepared Fedora 44 Docker workflow installs and builds that dependency for both sibling projects.
 
 ---
 
@@ -214,9 +203,8 @@ stream-server/
 ├── server/           # HTTP server and API routes
 ├── enginefs/         # Torrent engine abstraction
 │   └── src/backend/
-│       ├── librqbit.rs   # Pure Rust backend
 │       └── libtorrent.rs # Native C++ backend
-└── libtorrent-sys/   # FFI bindings to libtorrent-rasterbar
+└── bindings/libtorrent-sys/ # FFI bindings to libtorrent-rasterbar
 ```
 
 ---

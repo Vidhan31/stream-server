@@ -48,21 +48,22 @@ pub async fn get_stats(
     }
 
     if params.sys.as_deref() == Some("1") {
-        let mut system = sysinfo::System::new_all();
-        system.refresh_all();
-        let loadavg = sysinfo::System::load_average();
-        root.insert(
-            "sys".to_string(),
-            json!({
-                "loadavg": [loadavg.one, loadavg.five, loadavg.fifteen],
-                "cpus": system.cpus().iter().map(|cpu| {
-                    json!({
-                        "model": cpu.brand(),
-                        "speed": cpu.frequency(),
-                    })
-                }).collect::<Vec<_>>()
-            }),
-        );
+        if let Ok(mut system) = sysinfo::System::new_all() {
+            system.refresh_all();
+            let loadavg = sysinfo::System::load_average().unwrap_or_default();
+            root.insert(
+                "sys".to_string(),
+                json!({
+                    "loadavg": [loadavg.one, loadavg.five, loadavg.fifteen],
+                    "cpus": system.cpus().iter().map(|cpu| {
+                        json!({
+                            "model": cpu.brand(),
+                            "speed": cpu.frequency(),
+                        })
+                    }).collect::<Vec<_>>()
+                }),
+            );
+        }
     }
 
     Json(Value::Object(root))

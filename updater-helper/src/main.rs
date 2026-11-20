@@ -169,7 +169,10 @@ fn wait_for_parent_exit(parent_pid: u32, timeout: Duration) {
     }
 
     let started = Instant::now();
-    let mut system = System::new_all();
+    let Ok(mut system) = System::new_all() else {
+        log_line("could not inspect parent process state");
+        return;
+    };
     while started.elapsed() < timeout {
         system.refresh_all();
         if system.process(Pid::from_u32(parent_pid)).is_none() {

@@ -16,31 +16,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub const DEFAULT_HTTP_PORT: u16 = 11470;
 pub const DEFAULT_HTTPS_PORT: u16 = 12470;
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub static GLOBAL_STATE: once_cell::sync::Lazy<std::sync::RwLock<Option<AppState>>> =
     once_cell::sync::Lazy::new(|| std::sync::RwLock::new(None));
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-pub mod tray;
-
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-pub mod tray {
-    #[derive(Default)]
-    pub struct TrayStats;
-    impl TrayStats {
-        pub fn new() -> Self {
-            Self
-        }
-        pub fn update(&self, _down: f64, _up: f64, _peers: u64, _active: usize) {}
-        pub fn set_auto_update_enabled(&self, _enabled: bool) {}
-        pub fn set_seeding_enabled(&self, _enabled: bool) {}
-        pub fn update_update_status(&self, _label: String, _install_enabled: bool) {}
-        pub fn format_update_line(&self) -> String {
-            String::new()
-        }
-    }
-}
-
+#[cfg(target_os = "android")]
 pub mod jni;
 
 mod archives;
@@ -51,7 +30,6 @@ mod local_addon;
 mod routes;
 mod ssdp;
 mod state;
-mod tui;
 mod updater;
 pub mod ytdlp;
 
@@ -64,7 +42,6 @@ pub struct ServerConfig {
     pub public_base_url: Option<String>,
     pub config_dir: Option<PathBuf>,
     pub cache_dir: Option<PathBuf>,
-    pub use_tui: bool,
     pub init_logging: bool,
     pub manage_process_globals: bool,
     pub setup_ffmpeg: bool,
@@ -94,7 +71,6 @@ impl ServerConfig {
             public_base_url: None,
             config_dir: None,
             cache_dir: None,
-            use_tui: false,
             init_logging: false,
             manage_process_globals: false,
             setup_ffmpeg: false,
@@ -118,7 +94,6 @@ impl ServerConfig {
             public_base_url: Some(format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}")),
             config_dir: None,
             cache_dir: None,
-            use_tui: false,
             init_logging: true,
             manage_process_globals: true,
             setup_ffmpeg: true,
@@ -139,7 +114,6 @@ impl ServerConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownSource {
     CtrlC,
-    Tui,
     External,
 }
 
@@ -215,22 +189,12 @@ pub async fn run(
     external_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
     ready_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<Option<ShutdownSource>> {
-    run_inner(cfg, external_shutdown_rx, None, ready_tx).await
-}
-
-pub async fn run_with_tray_stats(
-    cfg: ServerConfig,
-    external_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-    tray_stats: Arc<tray::TrayStats>,
-    ready_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
-) -> anyhow::Result<Option<ShutdownSource>> {
-    run_inner(cfg, external_shutdown_rx, Some(tray_stats), ready_tx).await
+    run_inner(cfg, external_shutdown_rx, ready_tx).await
 }
 
 async fn run_inner(
     cfg: ServerConfig,
     mut external_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-    tray_stats: Option<Arc<tray::TrayStats>>,
     ready_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<Option<ShutdownSource>> {
     let listener = tokio::net::TcpListener::bind(cfg.http_addr)
@@ -242,13 +206,6 @@ async fn run_inner(
         .public_base_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", public_http_addr));
-
-    let (tui_log_layer, tui_rx) = if cfg.use_tui {
-        let (tx, rx) = crossbeam_channel::bounded(1000);
-        (Some(tui::log_layer::TuiLogLayer::new(tx)), Some(rx))
-    } else {
-        (None, None)
-    };
 
     let config_dir = match cfg.config_dir.clone() {
         Some(path) => path,
@@ -309,14 +266,7 @@ async fn run_inner(
             .with_writer(json_writer)
             .with_ansi(false);
 
-        let init_result = if let Some(layer) = tui_log_layer {
-            registry
-                .with(human_file_layer)
-                .with(archive_file_layer)
-                .with(json_file_layer)
-                .with(layer)
-                .try_init()
-        } else if std::io::stdout().is_terminal() {
+        let init_result = if std::io::stdout().is_terminal() {
             registry
                 .with(human_file_layer)
                 .with(archive_file_layer)
@@ -467,11 +417,8 @@ async fn run_inner(
     state.http_addr = public_http_addr;
     state.update_install_exit_enabled = cfg.enable_update_exit;
 
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        if let Ok(mut guard) = GLOBAL_STATE.write() {
-            *guard = Some(state.clone());
-        }
+    if let Ok(mut guard) = GLOBAL_STATE.write() {
+        *guard = Some(state.clone());
     }
 
     {
@@ -504,71 +451,6 @@ async fn run_inner(
         ));
     }
 
-    if let Some(stats) = tray_stats {
-        let engine_clone = state.engine.clone();
-        let download_engine_clone = state.download_engine.clone();
-        let updater_clone = state.updater.clone();
-        let settings_clone = state.settings.clone();
-        background_tasks.push(diagnostics::logging::spawn_logged(
-            "tray-stats",
-            async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    let mut all_stats = engine_clone.get_all_statistics().await;
-                    let download_stats = download_engine_clone.get_all_statistics().await;
-                    for (hash, stats) in download_stats {
-                        all_stats.insert(hash, stats);
-                    }
-
-                    let mut total_down = 0.0;
-                    let mut total_up = 0.0;
-                    let mut total_peers = 0u64;
-                    let active = all_stats.len();
-
-                    for (_, s) in all_stats {
-                        total_down += s.download_speed;
-                        total_up += s.upload_speed;
-                        total_peers += s.peers;
-                    }
-
-                    stats.update(total_down, total_up, total_peers, active);
-
-                    let settings = settings_clone.read().await.clone();
-                    stats.set_auto_update_enabled(settings.auto_update_enabled);
-                    stats.set_seeding_enabled(settings.seeding_enabled);
-                    let update_status = updater_clone.status(settings.update_channel).await;
-                    let install_enabled = matches!(
-                        update_status.state,
-                        crate::updater::state::UpdateOperationState::Available
-                            | crate::updater::state::UpdateOperationState::Staged
-                    );
-                    let label = if let Some(version) = update_status.staged_version {
-                        format!("Update: v{} staged", version)
-                    } else if let Some(version) = update_status.latest_version {
-                        format!("Update: v{} available", version)
-                    } else {
-                        match update_status.state {
-                            crate::updater::state::UpdateOperationState::Checking => {
-                                "Update: checking".to_string()
-                            }
-                            crate::updater::state::UpdateOperationState::Downloading => {
-                                "Update: downloading".to_string()
-                            }
-                            crate::updater::state::UpdateOperationState::Installing => {
-                                "Update: installing".to_string()
-                            }
-                            crate::updater::state::UpdateOperationState::Failed => {
-                                "Update: failed".to_string()
-                            }
-                            _ => "Update: up to date".to_string(),
-                        }
-                    };
-                    stats.update_update_status(label, install_enabled);
-                }
-            },
-        ));
-    }
-
     let local_files_dir = config_dir.join("localFiles");
     tokio::fs::create_dir_all(&local_files_dir).await?;
     if cfg.enable_local_addon_scan {
@@ -576,13 +458,6 @@ async fn run_inner(
             local_files_dir.to_string_lossy().to_string(),
             state.local_index.clone(),
         ));
-    }
-
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
-    if cfg.use_tui
-        && let Some(rx) = tui_rx
-    {
-        tui::start_tui(Arc::new(state.clone()), rx, shutdown_tx);
     }
 
     let app = build_router(state);
@@ -604,10 +479,6 @@ async fn run_inner(
             _ = maybe_ctrl_c(listen_for_ctrl_c) => {
                 tracing::info!("Ctrl+C received, shutting down");
                 ShutdownSource::CtrlC
-            }
-            _ = shutdown_rx.recv() => {
-                tracing::info!("Shutdown signal received from TUI, shutting down");
-                ShutdownSource::Tui
             }
             _ = external_shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received from external controller, shutting down");
@@ -699,11 +570,8 @@ async fn run_inner(
         task.abort();
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        if let Ok(mut guard) = GLOBAL_STATE.write() {
-            *guard = None;
-        }
+    if let Ok(mut guard) = GLOBAL_STATE.write() {
+        *guard = None;
     }
 
     Ok(shutdown_source)

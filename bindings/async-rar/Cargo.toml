@@ -9,16 +9,15 @@ keywords = ["rar", "unrar", "archive", "async", "ffi"]
 categories = ["compression", "asynchronous"]
 
 [dependencies]
-autocxx = "0.30"
+autocxx = "0.31"
 cxx = "1.0"
-tokio = { version = "1.48", features = ["rt", "sync"] }
-thiserror = "2"
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
+thiserror = "2.0.21"
 
 [build-dependencies]
-autocxx-build = "0.30"
+autocxx-build = "0.31"
 cc = "1.2"
 glob = "0.3"
 
 [dev-dependencies]
-tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }
-tempfile = "3"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }

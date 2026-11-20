@@ -92,14 +92,18 @@ pub struct CurrentLogTail {
 
 pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
     let pid_u32 = std::process::id();
-    let mut system = System::new_all();
-    system.refresh_all();
-
-    let process = system.process(Pid::from_u32(pid_u32));
+    let process_memory = System::new_all().ok().and_then(|mut system| {
+        system.refresh_all();
+        system
+            .process(Pid::from_u32(pid_u32))
+            .map(|process| (process.memory(), process.virtual_memory()))
+    });
     ProcessMemorySnapshot {
         pid: pid_u32,
-        rss_bytes: process.map(|process| process.memory()).unwrap_or(0),
-        virtual_memory_bytes: process.map(|process| process.virtual_memory()).unwrap_or(0),
+        rss_bytes: process_memory.map(|(rss, _)| rss).unwrap_or(0),
+        virtual_memory_bytes: process_memory
+            .map(|(_, virtual_memory)| virtual_memory)
+            .unwrap_or(0),
         thread_count: current_thread_count(),
     }
 }

@@ -243,7 +243,7 @@ fn extract_ffmpeg(zip_path: &Path, target_dir: &Path) -> Result<()> {
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let name = file.name().to_owned();
+        let name = file.name()?.into_owned();
 
         let path = Path::new(&name);
         if let Some(file_name) = path.file_name() {

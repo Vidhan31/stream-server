@@ -26,8 +26,6 @@ pub mod trackers;
 // Re-export TrackerStorage for use by server crate
 pub use trackers::TrackerStorage;
 
-#[cfg(all(feature = "librqbit", not(feature = "libtorrent")))]
-use crate::backend::librqbit::LibrqbitBackend;
 #[cfg(feature = "libtorrent")]
 use crate::backend::libtorrent::LibtorrentBackend;
 
@@ -160,9 +158,6 @@ pub struct EngineDiagnosticsSnapshot {
     pub streams: StreamActivitySnapshot,
     pub memory: BackendMemoryDiagnostics,
 }
-
-#[cfg(all(feature = "librqbit", not(feature = "libtorrent")))]
-pub type EngineFS = BackendEngineFS<LibrqbitBackend>;
 
 #[cfg(feature = "libtorrent")]
 pub type EngineFS = BackendEngineFS<LibtorrentBackend>;
@@ -1411,23 +1406,6 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
     /// Get a reference to the backend for direct access
     pub fn get_backend(&self) -> &Arc<B> {
         &self.backend
-    }
-}
-
-#[cfg(all(feature = "librqbit", not(feature = "libtorrent")))]
-impl BackendEngineFS<LibrqbitBackend> {
-    pub async fn new(
-        root_dir: std::path::PathBuf,
-        _cache_config: EngineCacheConfig,
-    ) -> Result<Self> {
-        let download_dir = root_dir.join("rqbit-downloads");
-        let (backend, restored) = LibrqbitBackend::new(download_dir.clone()).await?;
-        Ok(Self::new_with_backend(
-            backend,
-            restored,
-            root_dir.join("cache"),
-            download_dir,
-        ))
     }
 }
 

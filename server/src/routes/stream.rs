@@ -280,11 +280,11 @@ fn available_space_for_path(path: &FsPath) -> Option<u64> {
 }
 
 fn available_space_for_path_uncached(path: &FsPath) -> Option<u64> {
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disks = sysinfo::Disks::new_with_refreshed_list().ok()?;
     let mut best_match_len = 0usize;
     let mut best_available = None;
 
-    for disk in disks.list() {
+    for disk in &disks {
         let mount = disk.mount_point();
         if path.starts_with(mount) {
             let len = mount.as_os_str().len();
