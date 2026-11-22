@@ -1,3 +1,4 @@
+use crate::error::{AppError, AppResult};
 use crate::routes::compat;
 use crate::state::AppState;
 use crate::updater::version::UpdateChannel;
@@ -336,37 +337,6 @@ fn parse_torrent_proxy_type(value: &Value) -> Option<TorrentProxyType> {
     }
 }
 
-fn value_as_u16(value: &Value) -> Option<u16> {
-    value.as_u64().and_then(|n| u16::try_from(n).ok())
-}
-
-fn update_bool_setting(obj: &serde_json::Map<String, Value>, key: &str, target: &mut bool) {
-    if let Some(value) = obj.get(key).and_then(Value::as_bool) {
-        *target = value;
-    }
-}
-
-fn update_u16_setting(obj: &serde_json::Map<String, Value>, key: &str, target: &mut u16) {
-    if let Some(value) = obj.get(key).and_then(value_as_u16) {
-        *target = value;
-    }
-}
-
-fn update_string_setting(
-    obj: &serde_json::Map<String, Value>,
-    key: &str,
-    target: &mut String,
-    trim: bool,
-    allow_empty: bool,
-) {
-    if let Some(value) = obj.get(key).and_then(Value::as_str) {
-        let value = if trim { value.trim() } else { value };
-        if allow_empty || !value.is_empty() {
-            *target = value.to_string();
-        }
-    }
-}
-
 impl Default for ServerSettings {
     fn default() -> Self {
         let cache_root = std::env::var("STREMIO_CACHE_ROOT")
@@ -437,41 +407,106 @@ pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-pub async fn update_settings(state: &AppState, payload: &Value) -> anyhow::Result<()> {
-    tracing::debug!("update_settings: received payload: {:?}", payload);
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default)]
+pub struct ServerSettingsPatch {
+    #[serde(rename = "cacheRoot")]
+    pub cache_root: Option<String>,
+    #[serde(rename = "cacheSize")]
+    pub cache_size: Option<serde_json::Value>,
+    #[serde(rename = "proxyStreamsEnabled")]
+    pub proxy_streams_enabled: Option<bool>,
+    #[serde(rename = "transcodeProfile")]
+    pub transcode_profile: Option<serde_json::Value>,
+    #[serde(rename = "btMaxConnections")]
+    pub bt_max_connections: Option<u64>,
+    #[serde(rename = "btHandshakeTimeout")]
+    pub bt_handshake_timeout: Option<u64>,
+    #[serde(rename = "btRequestTimeout")]
+    pub bt_request_timeout: Option<u64>,
+    #[serde(rename = "btDownloadSpeedSoftLimit")]
+    pub bt_download_speed_soft_limit: Option<f64>,
+    #[serde(rename = "btDownloadSpeedHardLimit")]
+    pub bt_download_speed_hard_limit: Option<f64>,
+    #[serde(rename = "btMinPeersForStable")]
+    pub bt_min_peers_for_stable: Option<u64>,
+    #[serde(rename = "btEnableDht")]
+    pub bt_enable_dht: Option<bool>,
+    #[serde(rename = "btEnablePex")]
+    pub bt_enable_pex: Option<bool>,
+    #[serde(rename = "btEnableLsd")]
+    pub bt_enable_lsd: Option<bool>,
+    #[serde(rename = "btEncryptionMode")]
+    pub bt_encryption_mode: Option<serde_json::Value>,
+    #[serde(rename = "btAnonymousMode")]
+    pub bt_anonymous_mode: Option<bool>,
+    #[serde(rename = "btAllowMultipleConnectionsPerIp")]
+    pub bt_allow_multiple_connections_per_ip: Option<bool>,
+    #[serde(rename = "btListenInterfaces")]
+    pub bt_listen_interfaces: Option<String>,
+    #[serde(rename = "btOutgoingInterfaces")]
+    pub bt_outgoing_interfaces: Option<String>,
+    #[serde(rename = "btOutgoingPort")]
+    pub bt_outgoing_port: Option<u16>,
+    #[serde(rename = "btNumOutgoingPorts")]
+    pub bt_num_outgoing_ports: Option<u16>,
+    #[serde(rename = "btProxyType")]
+    pub bt_proxy_type: Option<serde_json::Value>,
+    #[serde(rename = "btProxyHost")]
+    pub bt_proxy_host: Option<String>,
+    #[serde(rename = "btProxyPort")]
+    pub bt_proxy_port: Option<u16>,
+    #[serde(rename = "btProxyUsername")]
+    pub bt_proxy_username: Option<String>,
+    #[serde(rename = "btProxyPassword")]
+    pub bt_proxy_password: Option<String>,
+    #[serde(rename = "btProxyHostnames")]
+    pub bt_proxy_hostnames: Option<bool>,
+    #[serde(rename = "btProxyPeerConnections")]
+    pub bt_proxy_peer_connections: Option<bool>,
+    #[serde(rename = "btProxyTrackerConnections")]
+    pub bt_proxy_tracker_connections: Option<bool>,
+    #[serde(rename = "btProxySendHostInConnect")]
+    pub bt_proxy_send_host_in_connect: Option<bool>,
+    #[serde(rename = "btValidateHttpsTrackers")]
+    pub bt_validate_https_trackers: Option<bool>,
+    #[serde(rename = "btSsrfMitigation")]
+    pub bt_ssrf_mitigation: Option<bool>,
+    #[serde(rename = "remoteHttps")]
+    pub remote_https: Option<serde_json::Value>,
+    #[serde(rename = "autoUpdateEnabled")]
+    pub auto_update_enabled: Option<bool>,
+    #[serde(rename = "updateChannel")]
+    pub update_channel: Option<serde_json::Value>,
+    #[serde(rename = "updateCheckIntervalHours")]
+    pub update_check_interval_hours: Option<u64>,
+    #[serde(rename = "seedingEnabled")]
+    pub seeding_enabled: Option<bool>,
+}
 
-    // Merge with existing settings
-    let mut settings = state.settings.write().await;
-
-    if let Some(obj) = payload.as_object() {
-        // Update fields that are present in the payload
-        if let Some(v) = obj.get("transcodeProfile") {
+impl ServerSettingsPatch {
+    pub fn apply(self, settings: &mut ServerSettings) {
+        if let Some(v) = self.transcode_profile {
             if v.is_null() {
                 settings.transcode_profile = None;
             } else if let Some(s) = v.as_str() {
                 settings.transcode_profile = Some(s.to_string());
             }
         }
-        if let Some(v) = obj.get("cacheSize") {
+        if let Some(v) = self.cache_size {
             if v.is_null() {
                 settings.cache_size = 0.0;
             } else if let Some(n) = v.as_f64() {
                 settings.cache_size = n;
             }
         }
-        if let Some(v) = obj.get("cacheRoot")
-            && let Some(s) = v.as_str()
-        {
-            settings.cache_root = s.to_string();
+        if let Some(s) = self.cache_root {
+            settings.cache_root = s;
         }
-        if let Some(v) = obj.get("proxyStreamsEnabled")
-            && let Some(b) = v.as_bool()
-        {
+        if let Some(b) = self.proxy_streams_enabled {
             settings.proxy_streams_enabled = b;
         }
-        if let Some(v) = obj.get("btMaxConnections")
-            && let Some(n) = v.as_u64()
-        {
+        if let Some(n) = self.bt_max_connections {
             settings.bt_max_connections =
                 if n == 0 || n >= enginefs::backend::LEGACY_UNLIMITED_BT_MAX_CONNECTIONS {
                     enginefs::backend::DEFAULT_BT_MAX_CONNECTIONS
@@ -479,137 +514,129 @@ pub async fn update_settings(state: &AppState, payload: &Value) -> anyhow::Resul
                     n
                 };
         }
-        if let Some(v) = obj.get("btHandshakeTimeout")
-            && let Some(n) = v.as_u64()
-        {
+        if let Some(n) = self.bt_handshake_timeout {
             settings.bt_handshake_timeout = n;
         }
-        if let Some(v) = obj.get("btRequestTimeout")
-            && let Some(n) = v.as_u64()
-        {
+        if let Some(n) = self.bt_request_timeout {
             settings.bt_request_timeout = n;
         }
-        if let Some(v) = obj.get("btDownloadSpeedSoftLimit")
-            && let Some(n) = v.as_f64()
-        {
+        if let Some(n) = self.bt_download_speed_soft_limit {
             settings.bt_download_speed_soft_limit = n;
         }
-        if let Some(v) = obj.get("btDownloadSpeedHardLimit")
-            && let Some(n) = v.as_f64()
-        {
+        if let Some(n) = self.bt_download_speed_hard_limit {
             settings.bt_download_speed_hard_limit = n;
         }
-        if let Some(v) = obj.get("btMinPeersForStable")
-            && let Some(n) = v.as_u64()
-        {
+        if let Some(n) = self.bt_min_peers_for_stable {
             settings.bt_min_peers_for_stable = n;
         }
-        update_bool_setting(obj, "btEnableDht", &mut settings.bt_enable_dht);
-        update_bool_setting(obj, "btEnablePex", &mut settings.bt_enable_pex);
-        update_bool_setting(obj, "btEnableLsd", &mut settings.bt_enable_lsd);
-        if let Some(mode) = obj
-            .get("btEncryptionMode")
+        if let Some(v) = self.bt_enable_dht {
+            settings.bt_enable_dht = v;
+        }
+        if let Some(v) = self.bt_enable_pex {
+            settings.bt_enable_pex = v;
+        }
+        if let Some(v) = self.bt_enable_lsd {
+            settings.bt_enable_lsd = v;
+        }
+        if let Some(v) = self
+            .bt_encryption_mode
+            .as_ref()
             .and_then(parse_torrent_encryption_mode)
         {
-            settings.bt_encryption_mode = mode;
+            settings.bt_encryption_mode = v;
         }
-        update_bool_setting(obj, "btAnonymousMode", &mut settings.bt_anonymous_mode);
-        update_bool_setting(
-            obj,
-            "btAllowMultipleConnectionsPerIp",
-            &mut settings.bt_allow_multiple_connections_per_ip,
-        );
-        update_string_setting(
-            obj,
-            "btListenInterfaces",
-            &mut settings.bt_listen_interfaces,
-            true,
-            false,
-        );
-        update_string_setting(
-            obj,
-            "btOutgoingInterfaces",
-            &mut settings.bt_outgoing_interfaces,
-            true,
-            true,
-        );
-        update_u16_setting(obj, "btOutgoingPort", &mut settings.bt_outgoing_port);
-        update_u16_setting(
-            obj,
-            "btNumOutgoingPorts",
-            &mut settings.bt_num_outgoing_ports,
-        );
-        if let Some(proxy_type) = obj.get("btProxyType").and_then(parse_torrent_proxy_type) {
-            settings.bt_proxy_type = proxy_type;
+        if let Some(v) = self.bt_anonymous_mode {
+            settings.bt_anonymous_mode = v;
         }
-        update_string_setting(obj, "btProxyHost", &mut settings.bt_proxy_host, true, true);
-        update_u16_setting(obj, "btProxyPort", &mut settings.bt_proxy_port);
-        update_string_setting(
-            obj,
-            "btProxyUsername",
-            &mut settings.bt_proxy_username,
-            false,
-            true,
-        );
-        update_string_setting(
-            obj,
-            "btProxyPassword",
-            &mut settings.bt_proxy_password,
-            false,
-            true,
-        );
-        update_bool_setting(obj, "btProxyHostnames", &mut settings.bt_proxy_hostnames);
-        update_bool_setting(
-            obj,
-            "btProxyPeerConnections",
-            &mut settings.bt_proxy_peer_connections,
-        );
-        update_bool_setting(
-            obj,
-            "btProxyTrackerConnections",
-            &mut settings.bt_proxy_tracker_connections,
-        );
-        update_bool_setting(
-            obj,
-            "btProxySendHostInConnect",
-            &mut settings.bt_proxy_send_host_in_connect,
-        );
-        update_bool_setting(
-            obj,
-            "btValidateHttpsTrackers",
-            &mut settings.bt_validate_https_trackers,
-        );
-        update_bool_setting(obj, "btSsrfMitigation", &mut settings.bt_ssrf_mitigation);
-        if let Some(v) = obj.get("remoteHttps") {
+        if let Some(v) = self.bt_allow_multiple_connections_per_ip {
+            settings.bt_allow_multiple_connections_per_ip = v;
+        }
+        if let Some(v) = self.bt_listen_interfaces {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                settings.bt_listen_interfaces = trimmed.to_string();
+            }
+        }
+        if let Some(v) = self.bt_outgoing_interfaces {
+            settings.bt_outgoing_interfaces = v.trim().to_string();
+        }
+        if let Some(v) = self.bt_outgoing_port {
+            settings.bt_outgoing_port = v;
+        }
+        if let Some(v) = self.bt_num_outgoing_ports {
+            settings.bt_num_outgoing_ports = v;
+        }
+        if let Some(v) = self
+            .bt_proxy_type
+            .as_ref()
+            .and_then(parse_torrent_proxy_type)
+        {
+            settings.bt_proxy_type = v;
+        }
+        if let Some(v) = self.bt_proxy_host {
+            settings.bt_proxy_host = v.trim().to_string();
+        }
+        if let Some(v) = self.bt_proxy_port {
+            settings.bt_proxy_port = v;
+        }
+        if let Some(v) = self.bt_proxy_username {
+            settings.bt_proxy_username = v;
+        }
+        if let Some(v) = self.bt_proxy_password {
+            settings.bt_proxy_password = v;
+        }
+        if let Some(v) = self.bt_proxy_hostnames {
+            settings.bt_proxy_hostnames = v;
+        }
+        if let Some(v) = self.bt_proxy_peer_connections {
+            settings.bt_proxy_peer_connections = v;
+        }
+        if let Some(v) = self.bt_proxy_tracker_connections {
+            settings.bt_proxy_tracker_connections = v;
+        }
+        if let Some(v) = self.bt_proxy_send_host_in_connect {
+            settings.bt_proxy_send_host_in_connect = v;
+        }
+        if let Some(v) = self.bt_validate_https_trackers {
+            settings.bt_validate_https_trackers = v;
+        }
+        if let Some(v) = self.bt_ssrf_mitigation {
+            settings.bt_ssrf_mitigation = v;
+        }
+        if let Some(v) = self.remote_https {
             if v.is_null() {
                 settings.remote_https = None;
             } else if let Some(s) = v.as_str() {
                 settings.remote_https = Some(s.to_string());
             }
         }
-        if let Some(v) = obj.get("autoUpdateEnabled")
-            && let Some(enabled) = v.as_bool()
-        {
-            settings.auto_update_enabled = enabled;
+        if let Some(v) = self.auto_update_enabled {
+            settings.auto_update_enabled = v;
         }
-        if let Some(v) = obj.get("updateChannel").and_then(|v| v.as_str()) {
-            settings.update_channel = if v.eq_ignore_ascii_case("prerelease") {
-                UpdateChannel::Prerelease
-            } else {
-                UpdateChannel::Stable
-            };
+        if let Some(v) = self.update_channel {
+            if let Some(s) = v.as_str() {
+                settings.update_channel = if s.eq_ignore_ascii_case("prerelease") {
+                    UpdateChannel::Prerelease
+                } else {
+                    UpdateChannel::Stable
+                };
+            }
         }
-        if let Some(v) = obj.get("updateCheckIntervalHours")
-            && let Some(hours) = v.as_u64()
-        {
-            settings.update_check_interval_hours = hours.max(1);
+        if let Some(v) = self.update_check_interval_hours {
+            settings.update_check_interval_hours = v.max(1);
         }
-        if let Some(v) = obj.get("seedingEnabled")
-            && let Some(enabled) = v.as_bool()
-        {
-            settings.seeding_enabled = enabled;
+        if let Some(v) = self.seeding_enabled {
+            settings.seeding_enabled = v;
         }
     }
+}
+
+pub async fn update_settings(state: &AppState, patch: ServerSettingsPatch) -> anyhow::Result<()> {
+    tracing::debug!("update_settings: applying patch: {:?}", patch);
+
+    // Merge with existing settings
+    let mut settings = state.settings.write().await;
+    patch.apply(&mut settings);
 
     let seeding_enabled = settings.seeding_enabled;
 
@@ -670,15 +697,12 @@ pub async fn update_settings(state: &AppState, payload: &Value) -> anyhow::Resul
 
 pub async fn set_settings(
     State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> impl IntoResponse {
-    match update_settings(&state, &payload).await {
-        Ok(_) => Json(json!({ "success": true })),
-        Err(e) => {
-            tracing::error!("Failed to save settings: {}", e);
-            Json(json!({ "success": false, "error": e.to_string() }))
-        }
-    }
+    Json(patch): Json<ServerSettingsPatch>,
+) -> AppResult<Json<serde_json::Value>> {
+    update_settings(&state, patch)
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to save settings: {}", e)))?;
+    Ok(Json(json!({ "success": true })))
 }
 pub async fn get_device_info() -> impl IntoResponse {
     let profiles = probe_hwaccel().await;
@@ -810,15 +834,13 @@ async fn verify_h264_encoder(encoder: &str) -> bool {
 pub async fn get_https(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let ip_address = match params.get("ipAddress") {
-        Some(ip) => ip,
-        None => return (StatusCode::BAD_REQUEST, "Missing ipAddress").into_response(),
-    };
-    let auth_key = match params.get("authKey") {
-        Some(key) => key,
-        None => return (StatusCode::BAD_REQUEST, "Missing authKey").into_response(),
-    };
+) -> AppResult<Json<serde_json::Value>> {
+    let ip_address = params
+        .get("ipAddress")
+        .ok_or_else(|| AppError::bad_request("Missing ipAddress"))?;
+    let auth_key = params
+        .get("authKey")
+        .ok_or_else(|| AppError::bad_request("Missing authKey"))?;
 
     let client = reqwest::Client::new();
     let api_url = "https://api.strem.io/api/certificateGet";
@@ -828,49 +850,31 @@ pub async fn get_https(
         "ipAddress": ip_address
     });
 
-    let resp = match client.post(api_url).json(&payload).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("API error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let resp = client
+        .post(api_url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("API error: {}", e)))?;
 
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("JSON error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("JSON error: {}", e)))?;
 
     // Parity with http_client_804.js: parse certificate response
     let result = &json["result"];
     if result.is_null() {
-        return (StatusCode::NOT_FOUND, "No certificate found in response").into_response();
+        return Err(AppError::not_found("No certificate found in response"));
     }
 
-    let cert_data_str = match result["certificate"].as_str() {
-        Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, "Certificate field missing").into_response(),
-    };
+    let cert_data_str = result["certificate"]
+        .as_str()
+        .ok_or_else(|| AppError::not_found("Certificate field missing"))?;
 
-    let cert_data: serde_json::Value = match serde_json::from_str(cert_data_str) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to parse inner certificate JSON",
-            )
-                .into_response();
-        }
-    };
+    let cert_data: serde_json::Value = serde_json::from_str(cert_data_str).map_err(|_| {
+        AppError::internal(anyhow::anyhow!("Failed to parse inner certificate JSON"))
+    })?;
 
     // Save to disk for main.rs HTTPS listener
     if let (Some(cert), Some(key)) = (
@@ -898,30 +902,24 @@ pub async fn get_https(
             .replace("*", "")
     );
 
-    // We should save this to disk, but for the API response:
-    Json(json!({
+    Ok(Json(json!({
         "ipAddress": ip_address,
         "domain": domain,
         "port": state.http_addr.port()
-    }))
-    .into_response()
+    })))
 }
 
-pub async fn get_samples(
-    axum::extract::Path(filename): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    // Parity with /samples/:filename
-    (
-        StatusCode::NOT_FOUND,
-        format!("Sample {} not found", filename),
-    )
-        .into_response()
+pub async fn get_samples(axum::extract::Path(filename): axum::extract::Path<String>) -> AppResult {
+    Err(AppError::not_found(format!(
+        "Sample {} not found",
+        filename
+    )))
 }
 
 pub async fn get_engine_stats(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
-) -> Response {
+) -> AppResult<Json<serde_json::Value>> {
     let info_hash = info_hash.to_lowercase();
 
     // Try to get existing engine, or auto-create from info hash
@@ -933,28 +931,24 @@ pub async fn get_engine_stats(
         tracing::info!("Auto-creating engine for stats request: {}", info_hash);
         let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
         let source = enginefs::backend::TorrentSource::Url(magnet);
-        match state.download_engine.add_torrent(source, None).await {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!("Failed to create engine: {}", e);
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create engine: {}", e),
-                )
-                    .into_response();
-            }
-        }
+        state
+            .download_engine
+            .add_torrent(source, None)
+            .await
+            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {}", e)))?
     };
 
     let stats = engine.get_statistics().await;
-    Json(serde_json::to_value(stats).unwrap()).into_response()
+    let value = serde_json::to_value(stats)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Serialization error: {}", e)))?;
+    Ok(Json(value))
 }
 
 pub async fn get_file_stats(
     State(state): State<AppState>,
     axum::extract::Path((info_hash, requested_idx)): axum::extract::Path<(String, String)>,
     RawQuery(query_str): RawQuery,
-) -> Response {
+) -> AppResult<Json<serde_json::Value>> {
     let info_hash = info_hash.to_lowercase();
 
     // Try to get existing engine, or auto-create from info hash
@@ -966,17 +960,11 @@ pub async fn get_file_stats(
         tracing::info!("Auto-creating engine for file stats request: {}", info_hash);
         let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
         let source = enginefs::backend::TorrentSource::Url(magnet);
-        match state.download_engine.add_torrent(source, None).await {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!("Failed to create engine: {}", e);
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create engine: {}", e),
-                )
-                    .into_response();
-            }
-        }
+        state
+            .download_engine
+            .add_torrent(source, None)
+            .await
+            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {}", e)))?
     };
 
     let files = engine.handle.get_files().await;
@@ -990,12 +978,9 @@ pub async fn get_file_stats(
         })
         .collect::<Vec<_>>();
     let filters = compat::query_values(query_str.as_deref(), "f");
-    let idx = match compat::resolve_file_idx(&requested_idx, &candidates, &filters) {
-        Ok(idx) => idx,
-        Err(err) => {
-            return (axum::http::StatusCode::NOT_FOUND, err).into_response();
-        }
-    };
+    let idx = compat::resolve_file_idx(&requested_idx, &candidates, &filters)
+        .map_err(AppError::not_found)?;
+
     state
         .stream_engine()
         .refresh_existing_hls_playback(&info_hash, idx, "stats-json")
@@ -1003,17 +988,9 @@ pub async fn get_file_stats(
 
     let mut stats = engine.get_statistics().await;
     if idx >= stats.files.len() {
-        return (
-            axum::http::StatusCode::NOT_FOUND,
-            "File index out of bounds",
-        )
-            .into_response();
+        return Err(AppError::not_found("File index out of bounds"));
     }
-    // Report progress for the exact file the client asked about. The guess
-    // inside get_statistics can resolve to a different file in a multi-file
-    // torrent, and downloaded/length stays stable during cold start (unlike the
-    // torrent's total_wanted set, which briefly collapses to the metadata
-    // window and spikes the percentage just before playback).
+
     let file = &stats.files[idx];
     stats.stream_name = file.name.clone();
     stats.stream_len = file.length;
@@ -1022,7 +999,10 @@ pub async fn get_file_stats(
     } else {
         0.0
     };
-    Json(serde_json::to_value(stats).unwrap()).into_response()
+
+    let value = serde_json::to_value(stats)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Serialization error: {}", e)))?;
+    Ok(Json(value))
 }
 
 #[cfg(test)]

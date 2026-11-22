@@ -32,10 +32,6 @@ pub async fn install_blockers(state: &AppState) -> Vec<String> {
         blockers.push("activeArchiveSessions".to_string());
     }
 
-    if !state.nzb_sessions.is_empty() {
-        blockers.push("activeNzbSessions".to_string());
-    }
-
     blockers
 }
 

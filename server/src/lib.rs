@@ -22,6 +22,9 @@ pub static GLOBAL_STATE: once_cell::sync::Lazy<std::sync::RwLock<Option<AppState
 #[cfg(target_os = "android")]
 pub mod jni;
 
+pub mod error;
+pub use error::{AppError, AppResult};
+
 mod archives;
 mod cache_cleaner;
 mod diagnostics;
@@ -704,10 +707,8 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/7zip", routes::archive::router())
         .nest("/tar", routes::archive::router())
         .nest("/tgz", routes::archive::router())
-        .nest("/nzb", routes::nzb::router())
         .nest("/local-addon", local_addon::get_router())
         .nest("/proxy", routes::proxy::router())
-        .nest("/ftp", routes::ftp::router())
         .route("/samples/{filename}", get(routes::system::get_samples))
         .route("/hlsv2/status", get(routes::hls::hls_status))
         .route("/hlsv2/{id}/destroy", get(routes::hls::hls_destroy))

@@ -1,4 +1,5 @@
 use crate::archives::ArchiveSession;
+use crate::error::{AppError, AppResult};
 use crate::routes::compat;
 use crate::state::AppState;
 use axum::{
@@ -106,94 +107,86 @@ async fn resolve_path(url: &str) -> Result<PathBuf, StatusCode> {
     }
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum RawArchivePayload {
+    Array(Vec<RawArchiveItem>),
+    Object {
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        urls: Vec<RawArchiveItem>,
+        #[serde(rename = "fileIdx")]
+        file_idx: Option<usize>,
+        #[serde(rename = "fileMustInclude", default)]
+        file_must_include: Vec<String>,
+    },
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum RawArchiveItem {
+    Direct(String),
+    Obj { url: String },
+    Array(Vec<String>),
+}
+
+impl RawArchiveItem {
+    fn into_url(self) -> Option<String> {
+        match self {
+            Self::Direct(s) => Some(s),
+            Self::Obj { url } => Some(url),
+            Self::Array(arr) => arr.into_iter().next(),
+        }
+    }
+}
+
 fn parse_create_request(
     lz: Option<String>,
     body: &axum::body::Bytes,
-) -> Result<ArchiveCreateRequest, String> {
-    let value = if let Some(lz) = lz {
+) -> Result<ArchiveCreateRequest, AppError> {
+    let payload: RawArchivePayload = if let Some(lz) = lz {
         let utf16 = lz_str::decompress_from_encoded_uri_component(&lz)
-            .ok_or_else(|| "Failed to decompress lz payload".to_string())?;
-        let json =
-            String::from_utf16(&utf16).map_err(|_| "Invalid UTF-16 in lz payload".to_string())?;
-        serde_json::from_str::<serde_json::Value>(&json)
-            .map_err(|err| format!("Invalid lz JSON payload: {err}"))?
+            .ok_or_else(|| AppError::bad_request("Failed to decompress lz payload"))?;
+        let json = String::from_utf16(&utf16)
+            .map_err(|_| AppError::bad_request("Invalid UTF-16 in lz payload"))?;
+        serde_json::from_str(&json)
+            .map_err(|err| AppError::bad_request(format!("Invalid lz JSON payload: {err}")))?
     } else if body.is_empty() {
-        return Err("Missing archive create payload".to_string());
+        return Err(AppError::bad_request("Missing archive create payload"));
     } else {
-        serde_json::from_slice::<serde_json::Value>(body)
-            .map_err(|err| format!("Invalid JSON payload: {err}"))?
+        serde_json::from_slice(body)
+            .map_err(|err| AppError::bad_request(format!("Invalid JSON payload: {err}")))?
     };
 
-    archive_request_from_value(&value)
-}
-
-fn archive_request_from_value(value: &serde_json::Value) -> Result<ArchiveCreateRequest, String> {
-    if let Some(items) = value.as_array() {
-        let urls = items
-            .iter()
-            .filter_map(|item| {
-                item.get("url")
-                    .and_then(|url| url.as_str())
-                    .or_else(|| item.as_str())
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>();
-        return Ok(ArchiveCreateRequest {
-            urls,
+    let request = match payload {
+        RawArchivePayload::Array(items) => ArchiveCreateRequest {
+            urls: items.into_iter().filter_map(|i| i.into_url()).collect(),
             file_idx: None,
             file_must_include: Vec::new(),
-        });
-    }
-
-    let Some(obj) = value.as_object() else {
-        return Err("Archive create payload must be an object or array".to_string());
+        },
+        RawArchivePayload::Object {
+            url,
+            urls,
+            file_idx,
+            file_must_include,
+        } => {
+            let mut resolved_urls: Vec<String> =
+                urls.into_iter().filter_map(|i| i.into_url()).collect();
+            if resolved_urls.is_empty()
+                && let Some(u) = url
+            {
+                resolved_urls.push(u);
+            }
+            ArchiveCreateRequest {
+                urls: resolved_urls,
+                file_idx,
+                file_must_include,
+            }
+        }
     };
 
-    let urls = obj
-        .get("urls")
-        .and_then(|urls| urls.as_array())
-        .map(|urls| {
-            urls.iter()
-                .filter_map(archive_url_from_value)
-                .collect::<Vec<_>>()
-        })
-        .or_else(|| {
-            obj.get("url")
-                .and_then(|url| url.as_str())
-                .map(|url| vec![url.to_string()])
-        })
-        .unwrap_or_default();
-
-    let file_idx = obj
-        .get("fileIdx")
-        .and_then(|idx| idx.as_u64())
-        .map(|idx| idx as usize);
-    let file_must_include = obj
-        .get("fileMustInclude")
-        .and_then(|filters| filters.as_array())
-        .map(|filters| {
-            filters
-                .iter()
-                .filter_map(|filter| filter.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(ArchiveCreateRequest {
-        urls,
-        file_idx,
-        file_must_include,
-    })
-}
-
-fn archive_url_from_value(value: &serde_json::Value) -> Option<String> {
-    value.as_str().map(str::to_string).or_else(|| {
-        value
-            .as_array()
-            .and_then(|parts| parts.first())
-            .and_then(|url| url.as_str())
-            .map(str::to_string)
-    })
+    Ok(request)
 }
 
 async fn select_archive_file(
@@ -277,7 +270,7 @@ async fn create_session_internal(
 ) -> Response {
     let payload = match parse_create_request(query.lz, &body) {
         Ok(payload) => payload,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => return err.into_response(),
     };
 
     if payload.urls.len() > 1 {

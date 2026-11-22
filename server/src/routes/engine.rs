@@ -1,9 +1,7 @@
+use crate::error::{AppError, AppResult};
 use crate::routes::compat;
 use crate::state::AppState;
-use axum::{
-    extract::{Json, State},
-    response::IntoResponse,
-};
+use axum::extract::{Json, State};
 use enginefs::backend::TorrentHandle;
 use hex;
 use serde::Deserialize;
@@ -33,33 +31,29 @@ pub struct PeerSearchBody {
 pub async fn create_engine(
     State(state): State<AppState>,
     Json(payload): Json<CreateEngineRequest>,
-) -> impl IntoResponse {
+) -> AppResult<Json<serde_json::Value>> {
     let source = if let Some(hex_str) = payload.torrent {
-        match hex::decode(hex_str) {
-            Ok(bytes) => enginefs::backend::TorrentSource::Bytes(bytes),
-            Err(e) => return Json(json!({ "error": format!("Invalid hex blob: {}", e) })),
-        }
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| AppError::bad_request(format!("Invalid hex blob: {}", e)))?;
+        enginefs::backend::TorrentSource::Bytes(bytes)
     } else if let Some(from) = payload.from {
         enginefs::backend::TorrentSource::Url(from)
     } else {
-        return Json(json!({ "error": "Missing 'from' or 'torrent' field" }));
+        return Err(AppError::bad_request("Missing 'from' or 'torrent' field"));
     };
 
     let trackers = merged_trackers(payload.announce, payload.peer_search);
     let file_must_include = payload.file_must_include;
     let should_guess = guess_file_idx_requested(payload.guess_file_idx.as_ref());
 
-    match state
+    let engine = state
         .stream_engine()
         .add_torrent(source, Some(trackers))
         .await
-    {
-        Ok(engine) => {
-            let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
-            Json(stats)
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add torrent: {}", e)))?;
+
+    let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
+    Ok(Json(stats))
 }
 pub async fn list_engines(State(state): State<AppState>) -> impl IntoResponse {
     let engines = state.stream_engine().list_engines().await;
@@ -108,7 +102,7 @@ pub async fn create_magnet(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
     Json(payload): Json<CreateMagnetRequest>,
-) -> impl IntoResponse {
+) -> AppResult<Json<serde_json::Value>> {
     // Use the info_hash from path or body
     let ih = payload
         .stream
@@ -125,33 +119,31 @@ pub async fn create_magnet(
     let file_must_include = payload.file_must_include;
     let should_guess = guess_file_idx_requested(payload.guess_file_idx.as_ref());
 
-    match state
+    let engine = state
         .stream_engine()
         .add_torrent(source, Some(trackers))
         .await
-    {
-        Ok(engine) => {
-            let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
-            Json(stats)
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {}", e)))?;
+
+    let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
+    Ok(Json(stats))
 }
 
 pub async fn create_magnet_get(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
-) -> impl IntoResponse {
+) -> AppResult<Json<serde_json::Value>> {
     let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
     let source = enginefs::backend::TorrentSource::Url(magnet);
 
-    match state.stream_engine().add_torrent(source, None).await {
-        Ok(engine) => {
-            let stats = stats_with_guess(&engine, &[], false).await;
-            Json(stats)
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let engine = state
+        .stream_engine()
+        .add_torrent(source, None)
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {}", e)))?;
+
+    let stats = stats_with_guess(&engine, &[], false).await;
+    Ok(Json(stats))
 }
 
 fn merged_trackers(

@@ -1,3 +1,4 @@
+use crate::error::{AppError, AppResult};
 use crate::routes::compat;
 use crate::state::AppState;
 use axum::{
@@ -16,6 +17,76 @@ pub struct ProbeQuery {
     #[serde(rename = "mediaURL")]
     pub media_url: Option<String>,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlsPlaylistType {
+    Video,
+    Audio(usize),
+}
+
+impl HlsPlaylistType {
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.strip_suffix(".m3u8")?;
+        if let Some(audio) = name.strip_prefix("audio-") {
+            audio.parse::<usize>().ok().map(Self::Audio)
+        } else {
+            Some(Self::Video)
+        }
+    }
+
+    pub fn audio_track_idx(&self) -> Option<usize> {
+        match self {
+            Self::Audio(idx) => Some(*idx),
+            Self::Video => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlsSegmentTarget {
+    Video(usize),
+    Audio { track_idx: usize, seg_idx: usize },
+}
+
+impl HlsSegmentTarget {
+    pub fn parse(segment: &str) -> Result<Self, AppError> {
+        let name = segment.strip_suffix(".ts").ok_or_else(|| {
+            AppError::bad_request(format!("Invalid segment extension: {segment}"))
+        })?;
+
+        if let Some(rest) = name.strip_prefix("audio-") {
+            let mut parts = rest.split('-');
+            let track_idx = parts
+                .next()
+                .and_then(|p| p.parse::<usize>().ok())
+                .ok_or_else(|| AppError::bad_request("Missing audio track index"))?;
+            let seg_idx = parts
+                .next()
+                .and_then(|p| p.parse::<usize>().ok())
+                .ok_or_else(|| AppError::bad_request("Missing audio segment index"))?;
+            Ok(Self::Audio { track_idx, seg_idx })
+        } else {
+            let seg_idx = name
+                .parse::<usize>()
+                .map_err(|_| AppError::bad_request(format!("Invalid segment index: {name}")))?;
+            Ok(Self::Video(seg_idx))
+        }
+    }
+
+    pub fn seg_index(&self) -> usize {
+        match *self {
+            Self::Video(idx) => idx,
+            Self::Audio { seg_idx, .. } => seg_idx,
+        }
+    }
+
+    pub fn audio_track_idx(&self) -> Option<usize> {
+        match *self {
+            Self::Audio { track_idx, .. } => Some(track_idx),
+            Self::Video(_) => None,
+        }
+    }
 }
 
 fn stremio_format_name(container: &str) -> String {
@@ -386,17 +457,7 @@ async fn get_stream_playlist(
 
     let segment_base_url = "./";
 
-    // Check if this is an audio playlist
-    // Format: "audio-{idx}.m3u8"
-    let audio_track_idx = if playlist_name.starts_with("audio-") {
-        playlist_name
-            .trim_start_matches("audio-")
-            .trim_end_matches(".m3u8")
-            .parse::<usize>()
-            .ok()
-    } else {
-        None
-    };
+    let audio_track_idx = HlsPlaylistType::parse(&playlist_name).and_then(|t| t.audio_track_idx());
 
     let playlist = enginefs::hls::HlsEngine::get_stream_playlist(
         &probe,
@@ -452,25 +513,13 @@ async fn get_segment(
         }
     };
 
-    // Parse segment type from filename
-    // Video: "0.ts", "1.ts", etc.
-    // Audio: "audio-{track_idx}-{segment_idx}.ts"
-    let segment_name = segment.trim_end_matches(".ts");
-    let (seg_index, audio_track_idx) = if segment_name.starts_with("audio-") {
-        let parts: Vec<&str> = segment_name.split('-').collect();
-        if parts.len() >= 3 {
-            let track_idx = parts[1].parse::<usize>().ok();
-            let seg_idx = parts[2].parse::<usize>().unwrap_or(0);
-            (seg_idx, track_idx)
-        } else {
-            return (StatusCode::BAD_REQUEST, "Invalid audio segment format").into_response();
-        }
-    } else {
-        match segment_name.parse::<usize>() {
-            Ok(i) => (i, None),
-            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid segment").into_response(),
-        }
+    // Parse segment target from filename
+    let target = match HlsSegmentTarget::parse(&segment) {
+        Ok(t) => t,
+        Err(err) => return err.into_response(),
     };
+    let seg_index = target.seg_index();
+    let audio_track_idx = target.audio_track_idx();
 
     state
         .stream_engine()

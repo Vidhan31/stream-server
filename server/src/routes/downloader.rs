@@ -1,7 +1,8 @@
-use axum::{Json, Router, extract::Query, http::StatusCode, response::IntoResponse, routing::get};
-use serde_json::json;
+use axum::{Json, Router, extract::Query, routing::get};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -14,53 +15,32 @@ pub fn router() -> Router<AppState> {
         .route("/remove", get(remove))
 }
 
-async fn get_all() -> impl IntoResponse {
+async fn get_all() -> Json<Value> {
     Json(json!([]))
 }
 
-async fn get_by_id(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn get_by_id(Query(params): Query<HashMap<String, String>>) -> AppResult<Json<Value>> {
     match params.get("id") {
-        Some(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": { "message": "there is no download with this id" } })),
-        ),
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": { "message": "missing id" } })),
-        ),
+        Some(_) => Err(AppError::not_found("there is no download with this id")),
+        None => Err(AppError::bad_request("missing id")),
     }
 }
 
-async fn add(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn add(Query(params): Query<HashMap<String, String>>) -> AppResult<Json<Value>> {
     match params.get("url") {
-        Some(_) => (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": { "message": "HTTP file downloader is not implemented" } })),
-        ),
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": { "code": 1, "message": "missing url" } })),
-        ),
+        Some(_) => Err(AppError::unsupported("HTTP file downloader")),
+        None => Err(AppError::bad_request("missing url")),
     }
 }
 
-async fn pause() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": { "message": "HTTP file downloader is not implemented" } })),
-    )
+async fn pause() -> AppResult<Json<Value>> {
+    Err(AppError::unsupported("HTTP file downloader"))
 }
 
-async fn resume() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": { "message": "HTTP file downloader is not implemented" } })),
-    )
+async fn resume() -> AppResult<Json<Value>> {
+    Err(AppError::unsupported("HTTP file downloader"))
 }
 
-async fn remove() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": { "message": "HTTP file downloader is not implemented" } })),
-    )
+async fn remove() -> AppResult<Json<Value>> {
+    Err(AppError::unsupported("HTTP file downloader"))
 }

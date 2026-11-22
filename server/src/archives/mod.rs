@@ -5,7 +5,6 @@ use tokio::io::{AsyncRead, AsyncSeek};
 
 pub mod bridge;
 pub mod cache;
-pub mod nzb;
 pub mod rar;
 pub mod sevenz;
 pub mod tar;
@@ -65,7 +64,7 @@ pub fn is_archive(path: &Path) -> bool {
         {
             return true;
         }
-        return matches!(ext.as_str(), "zip" | "rar" | "7z" | "tar" | "tgz" | "nzb");
+        return matches!(ext.as_str(), "zip" | "rar" | "7z" | "tar" | "tgz");
     }
     false
 }
@@ -142,9 +141,6 @@ pub async fn get_archive_reader_with_config(
     } else if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
         tracing::info!("Archive detected: TGZ at {:?}", path);
         Ok(Box::new(tgz::TgzHandler::new(path.to_path_buf()))) // TODO: Async Tgz
-    } else if path_str.ends_with(".nzb") {
-        tracing::info!("Archive detected: NZB at {:?}", path);
-        Ok(Box::new(nzb::NzbHandler::new(path.to_path_buf())))
     } else {
         tracing::info!("Normal file detected (not an archive): {:?}", path);
         Err(anyhow::anyhow!(

@@ -50,7 +50,6 @@ pub struct MemorySnapshot {
     pub download_storage_mode: &'static str,
     pub download_disk_backed_available: bool,
     pub archive_session_count: usize,
-    pub nzb_session_count: usize,
     pub active_direct_streams: u64,
 }
 
@@ -186,7 +185,6 @@ async fn memory_snapshot_for_state(state: &AppState) -> MemorySnapshot {
         download_storage_mode: "dynamic",
         download_disk_backed_available: state.download_engine_disk_backed,
         archive_session_count: state.archive_cache.len(),
-        nzb_session_count: state.nzb_sessions.len(),
         active_direct_streams: logging::active_direct_streams(),
     }
 }
@@ -265,7 +263,6 @@ pub fn start_memory_sampler(state: AppState) -> tokio::task::JoinHandle<()> {
                     waiter_keys = snapshot.engine.memory.waiter_keys,
                     waiter_wakers = snapshot.engine.memory.waiter_wakers,
                     archive_session_count = snapshot.archive_session_count,
-                    nzb_session_count = snapshot.nzb_session_count,
                     active_direct_streams = snapshot.active_direct_streams,
                     growth_bytes = growth,
                     growth_alert = should_log_growth,

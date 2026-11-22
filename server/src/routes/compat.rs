@@ -236,12 +236,7 @@ pub fn parse_hls_id(id: &str) -> Option<(String, usize)> {
 }
 
 pub fn unsupported(feature: &str) -> Response {
-    tracing::warn!(feature, "Stremio compatibility feature is not implemented");
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        [(header::CONTENT_TYPE, "application/json")],
-        Body::from(json!({ "error": format!("{feature} is not implemented") }).to_string()),
-    )
+    crate::error::AppError::Unsupported(Box::leak(feature.to_string().into_boxed_str()))
         .into_response()
 }
 

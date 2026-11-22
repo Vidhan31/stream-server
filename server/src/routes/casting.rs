@@ -1,3 +1,4 @@
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::{
     Json, Router,
@@ -51,15 +52,11 @@ pub async fn list_devices(
     Json(devices.clone())
 }
 
-pub async fn get_device(Path(dev_id): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        format!("Device {} not found", dev_id),
-    )
-        .into_response()
+pub async fn get_device(Path(dev_id): Path<String>) -> AppResult<Json<crate::ssdp::Device>> {
+    Err(AppError::not_found(format!("Device {} not found", dev_id)))
 }
 
-pub async fn transcode(Query(params): Query<TranscodeParams>) -> Response {
+pub async fn transcode(Query(params): Query<TranscodeParams>) -> AppResult {
     let video_url = params.video;
     let offset = params.time.unwrap_or(0.0);
     let is_fmp4 = params.fmp4.is_some();
@@ -105,16 +102,9 @@ pub async fn transcode(Query(params): Query<TranscodeParams>) -> Response {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::null());
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to spawn ffmpeg: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to spawn ffmpeg: {}", e)))?;
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stream = ReaderStream::new(stdout);
@@ -134,7 +124,7 @@ pub async fn transcode(Query(params): Query<TranscodeParams>) -> Response {
             "DLNA.ORG_OP=01;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01300000000000000000000000000000",
         )
         .body(axum::body::Body::from_stream(stream))
-        .unwrap()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to build response: {}", e)))
 }
 
 pub async fn player_control(
