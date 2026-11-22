@@ -9,21 +9,21 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub struct ZipHandler {
+pub(crate) struct ZipHandler {
     path: Option<PathBuf>,
     // Wrap in Arc<Mutex<Option>> to allow taking it out in `open_file` (one-shot)
     reader: Arc<Mutex<Option<Box<dyn AsyncSeekableReader>>>>,
 }
 
 impl ZipHandler {
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path: Some(path),
             reader: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn new_with_reader(reader: Box<dyn AsyncSeekableReader>) -> Self {
+    pub(crate) fn new_with_reader(reader: Box<dyn AsyncSeekableReader>) -> Self {
         Self {
             path: None,
             reader: Arc::new(Mutex::new(Some(reader))),
@@ -105,9 +105,13 @@ impl ArchiveReader for ZipHandler {
             .entries()
             .iter()
             .position(|e| e.filename().as_str().unwrap_or_default() == path)
-            .ok_or(anyhow!("File not found in archive"))?;
+            .ok_or_else(|| anyhow!("File not found in archive"))?;
 
-        let entry = archive.file().entries().get(index).unwrap();
+        let entry = archive
+            .file()
+            .entries()
+            .get(index)
+            .ok_or_else(|| anyhow!("Archive entry index out of bounds"))?;
         let size = entry.uncompressed_size();
 
         // Use ProgressiveCache for robust seeking

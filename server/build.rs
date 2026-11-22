@@ -13,7 +13,8 @@ fn main() {
         use chrono::Datelike;
         let now = chrono::Local::now();
         let copyright = format!("Copyright © {} Perpetus", now.year());
-        let exe_name = format!("{}.exe", std::env::var("CARGO_PKG_NAME").unwrap());
+        let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "server".to_string());
+        let exe_name = format!("{pkg_name}.exe");
 
         let mut res = winres::WindowsResource::new();
         res.set_manifest(
@@ -36,6 +37,8 @@ fn main() {
         res.set("LegalCopyright", &copyright);
         res.set("OriginalFilename", &exe_name);
         res.set_icon_with_id("../icons/app.ico", "MAINICON");
-        res.compile().unwrap();
+        if let Err(e) = res.compile() {
+            eprintln!("Failed to compile Windows resources: {e}");
+        }
     }
 }

@@ -1,12 +1,12 @@
-pub mod assets;
-pub mod changelog;
-pub mod error;
-pub mod github;
-pub mod idle;
-pub mod installer;
-pub mod staging;
-pub mod state;
-pub mod version;
+pub(crate) mod assets;
+pub(crate) mod changelog;
+pub(crate) mod error;
+pub(crate) mod github;
+pub(crate) mod idle;
+pub(crate) mod installer;
+pub(crate) mod staging;
+pub(crate) mod state;
+pub(crate) mod version;
 
 use self::{
     error::{UpdateError, UpdateErrorKind},
@@ -29,9 +29,10 @@ pub struct UpdateManager {
 impl UpdateManager {
     pub fn new(config_dir: PathBuf) -> Self {
         let channel = UpdateChannel::default();
-        let staging_root = dirs::cache_dir()
-            .map(|dir| dir.join("stremio-server").join("updates"))
-            .unwrap_or_else(|| config_dir.join("updates"));
+        let staging_root = dirs::cache_dir().map_or_else(
+            || config_dir.join("updates"),
+            |dir| dir.join("stremio-server").join("updates"),
+        );
         Self {
             inner: Arc::new(RwLock::new(UpdateInner::new(channel))),
             operation: Arc::new(Mutex::new(())),
@@ -249,7 +250,7 @@ impl UpdateManager {
     }
 }
 
-pub fn http_status_for_error(kind: UpdateErrorKind) -> axum::http::StatusCode {
+pub(crate) fn http_status_for_error(kind: UpdateErrorKind) -> axum::http::StatusCode {
     match kind {
         UpdateErrorKind::NotFound => axum::http::StatusCode::NOT_FOUND,
         UpdateErrorKind::Conflict => axum::http::StatusCode::CONFLICT,
@@ -261,7 +262,7 @@ pub fn http_status_for_error(kind: UpdateErrorKind) -> axum::http::StatusCode {
     }
 }
 
-pub fn schedule_process_exit_for_update() {
+pub(crate) fn schedule_process_exit_for_update() {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(700));
         std::process::exit(0);

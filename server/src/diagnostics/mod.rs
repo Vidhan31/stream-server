@@ -1,4 +1,4 @@
-pub mod logging;
+pub(crate) mod logging;
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -16,7 +16,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use serde_json::json;
 use sysinfo::{Pid, System};
 
 use crate::state::AppState;
@@ -31,7 +30,7 @@ impl IntoResponse for LocalOnly {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ProcessMemorySnapshot {
+pub(crate) struct ProcessMemorySnapshot {
     pub pid: u32,
     pub rss_bytes: u64,
     pub virtual_memory_bytes: u64,
@@ -39,7 +38,7 @@ pub struct ProcessMemorySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct MemorySnapshot {
+pub(crate) struct MemorySnapshot {
     pub process: ProcessMemorySnapshot,
     pub engine: enginefs::EngineDiagnosticsSnapshot,
     pub download_engine: enginefs::EngineDiagnosticsSnapshot,
@@ -54,14 +53,14 @@ pub struct MemorySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CrashDumpInfo {
+pub(crate) struct CrashDumpInfo {
     pub path: String,
     pub bytes: u64,
     pub modified_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct LogFileInfo {
+pub(crate) struct LogFileInfo {
     pub path: String,
     pub name: String,
     pub bytes: u64,
@@ -69,7 +68,7 @@ pub struct LogFileInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct LogsSnapshot {
+pub(crate) struct LogsSnapshot {
     pub log_dir: String,
     pub current_human_log: Option<String>,
     pub current_json_log: Option<String>,
@@ -77,19 +76,19 @@ pub struct LogsSnapshot {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct CurrentLogQuery {
+pub(crate) struct CurrentLogQuery {
     pub format: Option<String>,
     pub lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CurrentLogTail {
+pub(crate) struct CurrentLogTail {
     pub path: Option<String>,
     pub lines: Vec<String>,
     pub content: String,
 }
 
-pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
+pub(crate) fn process_memory_snapshot() -> ProcessMemorySnapshot {
     let pid_u32 = std::process::id();
     let process_memory = System::new_all().ok().and_then(|mut system| {
         system.refresh_all();
@@ -99,10 +98,8 @@ pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
     });
     ProcessMemorySnapshot {
         pid: pid_u32,
-        rss_bytes: process_memory.map(|(rss, _)| rss).unwrap_or(0),
-        virtual_memory_bytes: process_memory
-            .map(|(_, virtual_memory)| virtual_memory)
-            .unwrap_or(0),
+        rss_bytes: process_memory.map_or(0, |(rss, _)| rss),
+        virtual_memory_bytes: process_memory.map_or(0, |(_, virtual_memory)| virtual_memory),
         thread_count: current_thread_count(),
     }
 }
@@ -215,7 +212,7 @@ fn disk_tree_stats(root: &std::path::Path) -> (u64, u64) {
     (bytes, files)
 }
 
-pub fn start_memory_sampler(state: AppState) -> tokio::task::JoinHandle<()> {
+pub(crate) fn start_memory_sampler(state: AppState) -> tokio::task::JoinHandle<()> {
     logging::spawn_logged("memory-sampler", async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         let mut last_snapshot_log = Instant::now()
@@ -275,7 +272,7 @@ pub fn start_memory_sampler(state: AppState) -> tokio::task::JoinHandle<()> {
     })
 }
 
-pub async fn memory(
+pub(crate) async fn memory(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
@@ -286,7 +283,7 @@ pub async fn memory(
     Json(memory_snapshot_for_state(&state).await).into_response()
 }
 
-pub async fn streams(
+pub(crate) async fn streams(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
@@ -297,7 +294,7 @@ pub async fn streams(
     Json(state.stream_engine().stream_activity_snapshot().await).into_response()
 }
 
-pub async fn crashes(
+pub(crate) async fn crashes(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
@@ -308,7 +305,7 @@ pub async fn crashes(
     Json(list_crashes(&state)).into_response()
 }
 
-pub async fn logs(
+pub(crate) async fn logs(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
@@ -319,7 +316,7 @@ pub async fn logs(
     Json(logs_snapshot(&state)).into_response()
 }
 
-pub async fn current_log(
+pub(crate) async fn current_log(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(query): Query<CurrentLogQuery>,
@@ -368,7 +365,7 @@ pub async fn current_log(
     }
 }
 
-pub async fn export(
+pub(crate) async fn export(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
@@ -488,10 +485,10 @@ pub(crate) fn build_diagnostics_zip(state: &AppState) -> anyhow::Result<Vec<u8>>
         if !path.is_file() {
             continue;
         }
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "log".to_string());
+        let name = path.file_name().map_or_else(
+            || "log".to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
         zip.start_file(format!("logs/{name}"), options)?;
         let bytes = std::fs::read(&path)?;
         zip.write_all(&bytes)?;
@@ -502,13 +499,23 @@ pub(crate) fn build_diagnostics_zip(state: &AppState) -> anyhow::Result<Vec<u8>>
         zip.write_all(redact_settings_json(&settings).as_bytes())?;
     }
 
-    let manifest = json!({
-        "serverVersion": env!("CARGO_PKG_VERSION"),
-        "gitSha": option_env!("GIT_SHA").unwrap_or("unknown"),
-        "processId": std::process::id(),
-        "logDir": state.log_dir.display().to_string(),
-        "settingsPath": state.settings_path.display().to_string(),
-    });
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DiagnosticManifest {
+        server_version: &'static str,
+        git_sha: &'static str,
+        process_id: u32,
+        log_dir: String,
+        settings_path: String,
+    }
+
+    let manifest = DiagnosticManifest {
+        server_version: env!("CARGO_PKG_VERSION"),
+        git_sha: option_env!("GIT_SHA").unwrap_or("unknown"),
+        process_id: std::process::id(),
+        log_dir: state.log_dir.display().to_string(),
+        settings_path: state.settings_path.display().to_string(),
+    };
     zip.start_file("manifest.json", options)?;
     zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
 

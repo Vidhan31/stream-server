@@ -5,13 +5,12 @@ use crate::updater::version::UpdateChannel;
 use axum::{
     Json,
     extract::{Query, RawQuery, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
 };
 use enginefs::backend::{
     TorrentEncryptionMode, TorrentHandle, TorrentPrivacyConfig, TorrentProxyType,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 
 async fn combined_engine_stats(
@@ -31,11 +30,23 @@ async fn combined_engine_stats(
 }
 
 #[derive(serde::Deserialize)]
-pub struct StatsParams {
+pub(crate) struct StatsParams {
     pub sys: Option<String>, // "1"
 }
 
-pub async fn get_stats(
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct SysStats {
+    pub loadavg: [f64; 3],
+    pub cpus: Vec<CpuStats>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CpuStats {
+    pub model: String,
+    pub speed: u64,
+}
+
+pub(crate) async fn get_stats(
     State(state): State<AppState>,
     Query(params): Query<StatsParams>,
 ) -> impl IntoResponse {
@@ -48,33 +59,66 @@ pub async fn get_stats(
         root.insert(hash, serde_json::to_value(stats).unwrap_or(Value::Null));
     }
 
-    if params.sys.as_deref() == Some("1") {
-        if let Ok(mut system) = sysinfo::System::new_all() {
-            system.refresh_all();
-            let loadavg = sysinfo::System::load_average().unwrap_or_default();
-            root.insert(
-                "sys".to_string(),
-                json!({
-                    "loadavg": [loadavg.one, loadavg.five, loadavg.fifteen],
-                    "cpus": system.cpus().iter().map(|cpu| {
-                        json!({
-                            "model": cpu.brand(),
-                            "speed": cpu.frequency(),
-                        })
-                    }).collect::<Vec<_>>()
-                }),
-            );
+    if params.sys.as_deref() == Some("1")
+        && let Ok(mut system) = sysinfo::System::new_all()
+    {
+        system.refresh_all();
+        let loadavg = sysinfo::System::load_average().unwrap_or_default();
+        let sys = SysStats {
+            loadavg: [loadavg.one, loadavg.five, loadavg.fifteen],
+            cpus: system
+                .cpus()
+                .iter()
+                .map(|cpu| CpuStats {
+                    model: cpu.brand().to_string(),
+                    speed: cpu.frequency(),
+                })
+                .collect(),
+        };
+        if let Ok(val) = serde_json::to_value(sys) {
+            root.insert("sys".to_string(), val);
         }
     }
 
     Json(Value::Object(root))
 }
 
-pub async fn heartbeat() -> impl IntoResponse {
-    Json(json!({ "success": true }))
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SuccessResponse {
+    pub success: bool,
 }
 
-pub async fn network_info() -> impl IntoResponse {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AvailableInterfacesResponse {
+    #[serde(rename = "availableInterfaces")]
+    pub available_interfaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceInfoResponse {
+    #[serde(rename = "availableHardwareAccelerations")]
+    pub available_hardware_accelerations: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HwaccelProfilesResponse {
+    pub success: bool,
+    pub profiles: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CertificateSuccessResponse {
+    #[serde(rename = "ipAddress")]
+    pub ip_address: String,
+    pub domain: String,
+    pub port: u16,
+}
+
+pub(crate) async fn heartbeat() -> Json<SuccessResponse> {
+    Json(SuccessResponse { success: true })
+}
+
+pub(crate) async fn network_info() -> Json<AvailableInterfacesResponse> {
     let mut interfaces = Vec::new();
     if let Ok(if_addrs) = if_addrs::get_if_addrs() {
         for iface in if_addrs {
@@ -85,10 +129,12 @@ pub async fn network_info() -> impl IntoResponse {
             }
         }
     }
-    Json(json!({ "availableInterfaces": interfaces }))
+    Json(AvailableInterfacesResponse {
+        available_interfaces: interfaces,
+    })
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerSettings {
     #[serde(rename = "appPath")]
     pub app_path: String,
@@ -205,67 +251,67 @@ pub struct ServerSettings {
     pub seeding_enabled: bool,
 }
 
-pub fn default_trackers_url() -> String {
+pub(crate) fn default_trackers_url() -> String {
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt".to_string()
 }
 
-pub fn default_seeding_enabled() -> bool {
+pub(crate) fn default_seeding_enabled() -> bool {
     true
 }
 
-pub fn default_auto_update_enabled() -> bool {
+pub(crate) fn default_auto_update_enabled() -> bool {
     true
 }
 
-pub fn default_update_check_interval_hours() -> u64 {
+pub(crate) fn default_update_check_interval_hours() -> u64 {
     6
 }
 
-pub fn default_bt_enable_dht() -> bool {
+pub(crate) fn default_bt_enable_dht() -> bool {
     true
 }
 
-pub fn default_bt_enable_pex() -> bool {
+pub(crate) fn default_bt_enable_pex() -> bool {
     true
 }
 
-pub fn default_bt_enable_lsd() -> bool {
+pub(crate) fn default_bt_enable_lsd() -> bool {
     true
 }
 
-pub fn default_bt_anonymous_mode() -> bool {
+pub(crate) fn default_bt_anonymous_mode() -> bool {
     false
 }
 
-pub fn default_bt_allow_multiple_connections_per_ip() -> bool {
+pub(crate) fn default_bt_allow_multiple_connections_per_ip() -> bool {
     false
 }
 
-pub fn default_bt_listen_interfaces() -> String {
+pub(crate) fn default_bt_listen_interfaces() -> String {
     enginefs::backend::TorrentPrivacyConfig::default().bt_listen_interfaces
 }
 
-pub fn default_bt_proxy_hostnames() -> bool {
+pub(crate) fn default_bt_proxy_hostnames() -> bool {
     true
 }
 
-pub fn default_bt_proxy_peer_connections() -> bool {
+pub(crate) fn default_bt_proxy_peer_connections() -> bool {
     false
 }
 
-pub fn default_bt_proxy_tracker_connections() -> bool {
+pub(crate) fn default_bt_proxy_tracker_connections() -> bool {
     true
 }
 
-pub fn default_bt_proxy_send_host_in_connect() -> bool {
+pub(crate) fn default_bt_proxy_send_host_in_connect() -> bool {
     false
 }
 
-pub fn default_bt_validate_https_trackers() -> bool {
+pub(crate) fn default_bt_validate_https_trackers() -> bool {
     true
 }
 
-pub fn default_bt_ssrf_mitigation() -> bool {
+pub(crate) fn default_bt_ssrf_mitigation() -> bool {
     true
 }
 
@@ -349,9 +395,10 @@ impl Default for ServerSettings {
             });
 
         Self {
-            app_path: std::env::current_exe()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/usr/bin/stremio-server".to_string()),
+            app_path: std::env::current_exe().map_or_else(
+                |_| "/usr/bin/stremio-server".to_string(),
+                |p| p.to_string_lossy().to_string(),
+            ),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             cache_root,
             cache_size: 10.0 * 1024.0 * 1024.0 * 1024.0, // 10GB
@@ -396,20 +443,28 @@ impl Default for ServerSettings {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ServerSettingsResponse {
+    #[serde(rename = "baseUrl")]
+    pub base_url: String,
+    pub options: Vec<()>,
+    pub values: ServerSettings,
+}
+
 /// Returns server settings in the SettingsResponse format expected by stremio-core
 /// Response format: { "baseUrl": "http://...", "values": { ...settings } }
-pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
+pub(crate) async fn get_settings(State(state): State<AppState>) -> Json<ServerSettingsResponse> {
     let settings = state.settings.read().await;
-    Json(json!({
-        "baseUrl": state.base_url.clone(),
-        "options": [],
-        "values": settings.clone()
-    }))
+    Json(ServerSettingsResponse {
+        base_url: state.base_url.clone(),
+        options: Vec::new(),
+        values: settings.clone(),
+    })
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
-pub struct ServerSettingsPatch {
+pub(crate) struct ServerSettingsPatch {
     #[serde(rename = "cacheRoot")]
     pub cache_root: Option<String>,
     #[serde(rename = "cacheSize")]
@@ -485,7 +540,7 @@ pub struct ServerSettingsPatch {
 }
 
 impl ServerSettingsPatch {
-    pub fn apply(self, settings: &mut ServerSettings) {
+    pub(crate) fn apply(self, settings: &mut ServerSettings) {
         if let Some(v) = self.transcode_profile {
             if v.is_null() {
                 settings.transcode_profile = None;
@@ -613,14 +668,14 @@ impl ServerSettingsPatch {
         if let Some(v) = self.auto_update_enabled {
             settings.auto_update_enabled = v;
         }
-        if let Some(v) = self.update_channel {
-            if let Some(s) = v.as_str() {
-                settings.update_channel = if s.eq_ignore_ascii_case("prerelease") {
-                    UpdateChannel::Prerelease
-                } else {
-                    UpdateChannel::Stable
-                };
-            }
+        if let Some(v) = self.update_channel
+            && let Some(s) = v.as_str()
+        {
+            settings.update_channel = if s.eq_ignore_ascii_case("prerelease") {
+                UpdateChannel::Prerelease
+            } else {
+                UpdateChannel::Stable
+            };
         }
         if let Some(v) = self.update_check_interval_hours {
             settings.update_check_interval_hours = v.max(1);
@@ -631,7 +686,10 @@ impl ServerSettingsPatch {
     }
 }
 
-pub async fn update_settings(state: &AppState, patch: ServerSettingsPatch) -> anyhow::Result<()> {
+pub(crate) async fn update_settings(
+    state: &AppState,
+    patch: ServerSettingsPatch,
+) -> anyhow::Result<()> {
     tracing::debug!("update_settings: applying patch: {:?}", patch);
 
     // Merge with existing settings
@@ -695,33 +753,34 @@ pub async fn update_settings(state: &AppState, patch: ServerSettingsPatch) -> an
     Ok(())
 }
 
-pub async fn set_settings(
+pub(crate) async fn set_settings(
     State(state): State<AppState>,
     Json(patch): Json<ServerSettingsPatch>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<SuccessResponse>> {
     update_settings(&state, patch)
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to save settings: {}", e)))?;
-    Ok(Json(json!({ "success": true })))
-}
-pub async fn get_device_info() -> impl IntoResponse {
-    let profiles = probe_hwaccel().await;
-    Json(json!({
-        "availableHardwareAccelerations": profiles
-    }))
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to save settings: {e}")))?;
+    Ok(Json(SuccessResponse { success: true }))
 }
 
-pub async fn hwaccel_profiler() -> impl IntoResponse {
+pub(crate) async fn get_device_info() -> Json<DeviceInfoResponse> {
     let profiles = probe_hwaccel().await;
-    Json(json!({
-        "success": true,
-        "profiles": profiles
-    }))
+    Json(DeviceInfoResponse {
+        available_hardware_accelerations: profiles,
+    })
+}
+
+pub(crate) async fn hwaccel_profiler() -> Json<HwaccelProfilesResponse> {
+    let profiles = probe_hwaccel().await;
+    Json(HwaccelProfilesResponse {
+        success: true,
+        profiles,
+    })
 }
 
 static HWACCEL_PROFILES: tokio::sync::OnceCell<Vec<String>> = tokio::sync::OnceCell::const_new();
 
-pub async fn probe_hwaccel() -> Vec<String> {
+pub(crate) async fn probe_hwaccel() -> Vec<String> {
     HWACCEL_PROFILES
         .get_or_init(probe_hwaccel_uncached)
         .await
@@ -831,10 +890,37 @@ async fn verify_h264_encoder(encoder: &str) -> bool {
     }
 }
 
-pub async fn get_https(
+#[derive(serde::Serialize)]
+struct CertificateGetRequest<'a> {
+    #[serde(rename = "authKey")]
+    auth_key: &'a str,
+    #[serde(rename = "ipAddress")]
+    ip_address: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+struct CertificateApiResponse {
+    result: Option<CertificateApiResult>,
+}
+
+#[derive(serde::Deserialize)]
+struct CertificateApiResult {
+    certificate: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct InnerCertData {
+    certificate: Option<String>,
+    #[serde(rename = "privateKey")]
+    private_key: Option<String>,
+    #[serde(rename = "commonName")]
+    common_name: Option<String>,
+}
+
+pub(crate) async fn get_https(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<CertificateSuccessResponse>> {
     let ip_address = params
         .get("ipAddress")
         .ok_or_else(|| AppError::bad_request("Missing ipAddress"))?;
@@ -842,84 +928,83 @@ pub async fn get_https(
         .get("authKey")
         .ok_or_else(|| AppError::bad_request("Missing authKey"))?;
 
-    let client = reqwest::Client::new();
     let api_url = "https://api.strem.io/api/certificateGet";
 
-    let payload = json!({
-        "authKey": auth_key,
-        "ipAddress": ip_address
-    });
+    let payload = CertificateGetRequest {
+        auth_key,
+        ip_address,
+    };
 
-    let resp = client
+    let resp = state
+        .http_client
         .post(api_url)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("API error: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("API error: {e}")))?;
 
-    let json: serde_json::Value = resp
+    let api_resp: CertificateApiResponse = resp
         .json()
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("JSON error: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("JSON error: {e}")))?;
 
     // Parity with http_client_804.js: parse certificate response
-    let result = &json["result"];
-    if result.is_null() {
-        return Err(AppError::not_found("No certificate found in response"));
-    }
+    let result = api_resp
+        .result
+        .ok_or_else(|| AppError::not_found("No certificate found in response"))?;
 
-    let cert_data_str = result["certificate"]
-        .as_str()
+    let cert_data_str = result
+        .certificate
         .ok_or_else(|| AppError::not_found("Certificate field missing"))?;
 
-    let cert_data: serde_json::Value = serde_json::from_str(cert_data_str).map_err(|_| {
+    let cert_data: InnerCertData = serde_json::from_str(&cert_data_str).map_err(|_| {
         AppError::internal(anyhow::anyhow!("Failed to parse inner certificate JSON"))
     })?;
 
     // Save to disk for main.rs HTTPS listener
     if let (Some(cert), Some(key)) = (
-        cert_data["certificate"].as_str(),
-        cert_data["privateKey"].as_str(),
+        cert_data.certificate.as_deref(),
+        cert_data.private_key.as_deref(),
     ) {
         let cert_path = state.config_dir.join("https-cert.pem");
         let key_path = state.config_dir.join("https-key.pem");
 
         if let Err(e) = tokio::fs::write(&cert_path, cert).await {
-            tracing::error!("Failed to write https-cert.pem: {}", e);
+            tracing::error!("Failed to write https-cert.pem: {e}");
         }
         if let Err(e) = tokio::fs::write(&key_path, key).await {
-            tracing::error!("Failed to write https-key.pem: {}", e);
+            tracing::error!("Failed to write https-key.pem: {e}");
         }
         tracing::info!("Saved HTTPS certificates to {:?}", state.config_dir);
     }
 
     let domain = format!(
         "{}-{}",
-        ip_address.replace(".", "-"),
-        cert_data["commonName"]
-            .as_str()
+        ip_address.replace('.', "-"),
+        cert_data
+            .common_name
+            .as_deref()
             .unwrap_or("")
-            .replace("*", "")
+            .replace('*', "")
     );
 
-    Ok(Json(json!({
-        "ipAddress": ip_address,
-        "domain": domain,
-        "port": state.http_addr.port()
-    })))
+    Ok(Json(CertificateSuccessResponse {
+        ip_address: ip_address.clone(),
+        domain,
+        port: state.http_addr.port(),
+    }))
 }
 
-pub async fn get_samples(axum::extract::Path(filename): axum::extract::Path<String>) -> AppResult {
-    Err(AppError::not_found(format!(
-        "Sample {} not found",
-        filename
-    )))
+pub(crate) async fn get_samples(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> AppResult {
+    Err(AppError::not_found(format!("Sample {filename} not found")))
 }
 
-pub async fn get_engine_stats(
+pub(crate) async fn get_engine_stats(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<enginefs::backend::EngineStats>> {
     let info_hash = info_hash.to_lowercase();
 
     // Try to get existing engine, or auto-create from info hash
@@ -928,27 +1013,25 @@ pub async fn get_engine_stats(
     } else if let Some(e) = state.engine.get_engine(&info_hash).await {
         e
     } else {
-        tracing::info!("Auto-creating engine for stats request: {}", info_hash);
-        let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+        tracing::info!("Auto-creating engine for stats request: {info_hash}");
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
         let source = enginefs::backend::TorrentSource::Url(magnet);
         state
             .download_engine
             .add_torrent(source, None)
             .await
-            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {}", e)))?
+            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {e}")))?
     };
 
     let stats = engine.get_statistics().await;
-    let value = serde_json::to_value(stats)
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Serialization error: {}", e)))?;
-    Ok(Json(value))
+    Ok(Json(stats))
 }
 
-pub async fn get_file_stats(
+pub(crate) async fn get_file_stats(
     State(state): State<AppState>,
     axum::extract::Path((info_hash, requested_idx)): axum::extract::Path<(String, String)>,
     RawQuery(query_str): RawQuery,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<enginefs::backend::EngineStats>> {
     let info_hash = info_hash.to_lowercase();
 
     // Try to get existing engine, or auto-create from info hash
@@ -957,14 +1040,14 @@ pub async fn get_file_stats(
     } else if let Some(e) = state.engine.get_engine(&info_hash).await {
         e
     } else {
-        tracing::info!("Auto-creating engine for file stats request: {}", info_hash);
-        let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+        tracing::info!("Auto-creating engine for file stats request: {info_hash}");
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
         let source = enginefs::backend::TorrentSource::Url(magnet);
         state
             .download_engine
             .add_torrent(source, None)
             .await
-            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {}", e)))?
+            .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to create engine: {e}")))?
     };
 
     let files = engine.handle.get_files().await;
@@ -1000,9 +1083,7 @@ pub async fn get_file_stats(
         0.0
     };
 
-    let value = serde_json::to_value(stats)
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Serialization error: {}", e)))?;
-    Ok(Json(value))
+    Ok(Json(stats))
 }
 
 #[cfg(test)]

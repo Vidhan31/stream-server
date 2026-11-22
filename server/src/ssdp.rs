@@ -16,7 +16,7 @@ pub struct Device {
     pub model: Option<String>,
 }
 
-pub async fn start_discovery(devices: Arc<tokio::sync::RwLock<Vec<Device>>>) {
+pub(crate) async fn start_discovery(devices: Arc<tokio::sync::RwLock<Vec<Device>>>) {
     info!("Starting SSDP discovery...");
     let search_targets = vec![
         "urn:schemas-upnp-org:device:MediaRenderer:1",

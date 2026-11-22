@@ -6,6 +6,32 @@
 //! - VTT (WebVTT) output with styling preservation
 
 use regex::Regex;
+use std::fmt::Write as _;
+use std::sync::LazyLock;
+
+static SRT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d+\s*\r?\n\d{2}:\d{2}:\d{2},\d{3}").expect("valid regex"));
+static SRT_TIMESTAMP_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})")
+        .expect("valid regex")
+});
+static DIALOGUE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"Dialogue:\s*\d+,(\d+):(\d{2}):(\d{2})\.(\d{2}),(\d+):(\d{2}):(\d{2})\.(\d{2}),[^,]*,[^,]*,\d+,\d+,\d+,[^,]*,(.*)"
+    ).expect("valid regex")
+});
+static VTT_CUE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})")
+        .expect("valid regex")
+});
+static HTML_COLOR_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<font\s+color=["']?([^"'>]+)["']?>"#).expect("valid regex"));
+static HTML_TAG_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("valid regex"));
+static ASS_COLOR_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\(?:1?c)&H([0-9A-Fa-f]{6})&").expect("valid regex"));
+static ASS_TAG_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{[^}]*\}").expect("valid regex"));
 
 /// Subtitle format detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,10 +82,9 @@ impl ParsedSubtitle {
     pub fn parse(content: &str) -> Self {
         let format = detect_format(content);
         let cues = match format {
-            SubFormat::Srt => parse_srt(content),
+            SubFormat::Srt | SubFormat::Unknown => parse_srt(content), // Fallback to SRT
             SubFormat::Ass => parse_ass(content),
             SubFormat::Vtt => parse_vtt(content),
-            SubFormat::Unknown => parse_srt(content), // Fallback to SRT
         };
         Self { format, cues }
     }
@@ -70,14 +95,15 @@ impl ParsedSubtitle {
 
         for (i, cue) in self.cues.iter().enumerate() {
             // Cue identifier (optional but helpful)
-            output.push_str(&format!("{}\n", i + 1));
+            let _ = writeln!(output, "{}", i + 1);
 
             // Timestamps
-            output.push_str(&format!(
-                "{} --> {}\n",
+            let _ = writeln!(
+                output,
+                "{} --> {}",
                 format_vtt_time(cue.start_ms),
                 format_vtt_time(cue.end_ms)
-            ));
+            );
 
             // Text with styling
             let styled_text = apply_vtt_styling(&cue.text, cue.style.as_ref());
@@ -102,8 +128,7 @@ fn detect_format(content: &str) -> SubFormat {
     }
 
     // Check for SRT pattern (number, timestamp, text)
-    let srt_pattern = Regex::new(r"^\d+\s*\r?\n\d{2}:\d{2}:\d{2},\d{3}").unwrap();
-    if srt_pattern.is_match(trimmed) {
+    if SRT_PATTERN.is_match(trimmed) {
         return SubFormat::Srt;
     }
 
@@ -113,10 +138,6 @@ fn detect_format(content: &str) -> SubFormat {
 /// Parse SRT format
 fn parse_srt(content: &str) -> Vec<SubtitleCue> {
     let mut cues = Vec::new();
-
-    let timestamp_pattern =
-        Regex::new(r"^\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})")
-            .unwrap();
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
     for block in normalized.split("\n\n") {
@@ -127,22 +148,22 @@ fn parse_srt(content: &str) -> Vec<SubtitleCue> {
         let Some(timestamp_line) = lines.next() else {
             continue;
         };
-        let Some(caps) = timestamp_pattern.captures(timestamp_line) else {
+        let Some(caps) = SRT_TIMESTAMP_PATTERN.captures(timestamp_line) else {
             continue;
         };
 
         let start_ms = parse_time_components(
-            caps.get(1).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(2).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(3).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(4).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(1).map_or("0", |m| m.as_str()),
+            caps.get(2).map_or("0", |m| m.as_str()),
+            caps.get(3).map_or("0", |m| m.as_str()),
+            caps.get(4).map_or("0", |m| m.as_str()),
         );
 
         let end_ms = parse_time_components(
-            caps.get(5).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(6).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(7).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(8).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(5).map_or("0", |m| m.as_str()),
+            caps.get(6).map_or("0", |m| m.as_str()),
+            caps.get(7).map_or("0", |m| m.as_str()),
+            caps.get(8).map_or("0", |m| m.as_str()),
         );
 
         let text = lines.collect::<Vec<_>>().join("\n");
@@ -167,27 +188,23 @@ fn parse_ass(content: &str) -> Vec<SubtitleCue> {
     let mut cues = Vec::new();
 
     // Find [Events] section and parse Dialogue lines
-    let dialogue_pattern = Regex::new(
-        r"Dialogue:\s*\d+,(\d+):(\d{2}):(\d{2})\.(\d{2}),(\d+):(\d{2}):(\d{2})\.(\d{2}),[^,]*,[^,]*,\d+,\d+,\d+,[^,]*,(.*)"
-    ).unwrap();
-
-    for caps in dialogue_pattern.captures_iter(content) {
+    for caps in DIALOGUE_PATTERN.captures_iter(content) {
         // ASS uses centiseconds (1/100th second)
         let start_ms = parse_ass_time(
-            caps.get(1).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(2).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(3).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(4).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(1).map_or("0", |m| m.as_str()),
+            caps.get(2).map_or("0", |m| m.as_str()),
+            caps.get(3).map_or("0", |m| m.as_str()),
+            caps.get(4).map_or("0", |m| m.as_str()),
         );
 
         let end_ms = parse_ass_time(
-            caps.get(5).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(6).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(7).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(8).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(5).map_or("0", |m| m.as_str()),
+            caps.get(6).map_or("0", |m| m.as_str()),
+            caps.get(7).map_or("0", |m| m.as_str()),
+            caps.get(8).map_or("0", |m| m.as_str()),
         );
 
-        let raw_text = caps.get(9).map(|m| m.as_str()).unwrap_or("");
+        let raw_text = caps.get(9).map_or("", |m| m.as_str());
 
         // Parse ASS inline tags and convert to clean text with styling
         let (clean_text, style) = parse_ass_styling(raw_text);
@@ -206,11 +223,6 @@ fn parse_ass(content: &str) -> Vec<SubtitleCue> {
 /// Parse VTT format (passthrough with minimal processing)
 fn parse_vtt(content: &str) -> Vec<SubtitleCue> {
     let mut cues = Vec::new();
-
-    let cue_pattern = Regex::new(
-        r"^\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})",
-    )
-    .unwrap();
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
     for block in normalized.split("\n\n") {
@@ -218,22 +230,22 @@ fn parse_vtt(content: &str) -> Vec<SubtitleCue> {
         let Some(timestamp_idx) = lines.iter().position(|line| line.contains("-->")) else {
             continue;
         };
-        let Some(caps) = cue_pattern.captures(lines[timestamp_idx]) else {
+        let Some(caps) = VTT_CUE_PATTERN.captures(lines[timestamp_idx]) else {
             continue;
         };
 
         let start_ms = parse_time_components(
-            caps.get(1).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(2).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(3).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(4).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(1).map_or("0", |m| m.as_str()),
+            caps.get(2).map_or("0", |m| m.as_str()),
+            caps.get(3).map_or("0", |m| m.as_str()),
+            caps.get(4).map_or("0", |m| m.as_str()),
         );
 
         let end_ms = parse_time_components(
-            caps.get(5).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(6).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(7).map(|m| m.as_str()).unwrap_or("0"),
-            caps.get(8).map(|m| m.as_str()).unwrap_or("0"),
+            caps.get(5).map_or("0", |m| m.as_str()),
+            caps.get(6).map_or("0", |m| m.as_str()),
+            caps.get(7).map_or("0", |m| m.as_str()),
+            caps.get(8).map_or("0", |m| m.as_str()),
         );
 
         let text = lines
@@ -263,7 +275,7 @@ fn parse_time_components(hours: &str, mins: &str, secs: &str, millis: &str) -> u
     let s: u64 = secs.parse().unwrap_or(0);
     let ms: u64 = millis.parse().unwrap_or(0);
 
-    h * 3600000 + m * 60000 + s * 1000 + ms
+    h * 3_600_000 + m * 60_000 + s * 1000 + ms
 }
 
 /// Parse ASS time format (H:MM:SS.cc where cc is centiseconds)
@@ -273,7 +285,7 @@ fn parse_ass_time(hours: &str, mins: &str, secs: &str, centis: &str) -> u64 {
     let s: u64 = secs.parse().unwrap_or(0);
     let cs: u64 = centis.parse().unwrap_or(0);
 
-    h * 3600000 + m * 60000 + s * 1000 + cs * 10
+    h * 3_600_000 + m * 60_000 + s * 1000 + cs * 10
 }
 
 /// Parse SRT inline styling tags (<b>, <i>, <u>, <font color="...">)
@@ -296,15 +308,15 @@ fn parse_srt_styling(text: &str) -> (String, Option<CueStyle>) {
     }
 
     // Check for font color
-    let color_pattern = Regex::new(r#"<font\s+color=["']?([^"'>]+)["']?>"#).unwrap();
-    if let Some(caps) = color_pattern.captures(text) {
-        style.color = Some(caps.get(1).unwrap().as_str().to_string());
+    if let Some(caps) = HTML_COLOR_PATTERN.captures(text)
+        && let Some(color_match) = caps.get(1)
+    {
+        style.color = Some(color_match.as_str().to_string());
         has_style = true;
     }
 
     // Strip all HTML-like tags for clean text
-    let tag_pattern = Regex::new(r"<[^>]+>").unwrap();
-    let clean = tag_pattern.replace_all(text, "").to_string();
+    let clean = HTML_TAG_PATTERN.replace_all(text, "").to_string();
 
     (clean, if has_style { Some(style) } else { None })
 }
@@ -333,38 +345,35 @@ fn parse_ass_styling(text: &str) -> (String, Option<CueStyle>) {
     }
 
     // Check for color {\c&HBBGGRR&} or {\1c&HBBGGRR&}
-    let color_pattern = Regex::new(r"\\(?:1?c)&H([0-9A-Fa-f]{6})&").unwrap();
-    if let Some(caps) = color_pattern.captures(text) {
-        let bgr = caps.get(1).unwrap().as_str();
+    if let Some(caps) = ASS_COLOR_PATTERN.captures(text)
+        && let Some(color_match) = caps.get(1)
+    {
+        let bgr = color_match.as_str();
         // Convert BGR to RGB
         if bgr.len() == 6 {
             let r = &bgr[4..6];
             let g = &bgr[2..4];
             let b = &bgr[0..2];
-            style.color = Some(format!("#{}{}{}", r, g, b));
+            style.color = Some(format!("#{r}{g}{b}"));
             has_style = true;
         }
     }
 
     // Strip ASS override tags and convert \N to newlines
-    let tag_pattern = Regex::new(r"\{[^}]*\}").unwrap();
-    let clean = tag_pattern.replace_all(text, "");
+    let clean = ASS_TAG_PATTERN.replace_all(text, "");
     let clean = clean.replace(r"\N", "\n").replace(r"\n", "\n");
 
-    (
-        clean.to_string(),
-        if has_style { Some(style) } else { None },
-    )
+    (clean, if has_style { Some(style) } else { None })
 }
 
 /// Format milliseconds as VTT timestamp (HH:MM:SS.mmm)
 fn format_vtt_time(ms: u64) -> String {
-    let hours = ms / 3600000;
-    let mins = (ms % 3600000) / 60000;
-    let secs = (ms % 60000) / 1000;
+    let hours = ms / 3_600_000;
+    let mins = (ms % 3_600_000) / 60_000;
+    let secs = (ms % 60_000) / 1000;
     let millis = ms % 1000;
 
-    format!("{:02}:{:02}:{:02}.{:03}", hours, mins, secs, millis)
+    format!("{hours:02}:{mins:02}:{secs:02}.{millis:03}")
 }
 
 /// Apply VTT styling tags to text
@@ -374,13 +383,13 @@ fn apply_vtt_styling(text: &str, style: Option<&CueStyle>) -> String {
     if let Some(s) = style {
         // Wrap with styling tags
         if s.bold {
-            result = format!("<b>{}</b>", result);
+            result = format!("<b>{result}</b>");
         }
         if s.italic {
-            result = format!("<i>{}</i>", result);
+            result = format!("<i>{result}</i>");
         }
         if s.underline {
-            result = format!("<u>{}</u>", result);
+            result = format!("<u>{result}</u>");
         }
         // Note: VTT color requires CSS classes or styles which may not work in all players
         // We'll use the <c> tag with color class

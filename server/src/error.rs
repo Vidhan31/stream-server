@@ -3,7 +3,16 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+
+#[derive(Debug, serde::Serialize)]
+pub struct ErrorEnvelope {
+    pub error: ErrorDetail,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ErrorDetail {
+    pub message: String,
+}
 
 #[derive(Debug)]
 pub enum AppError {
@@ -81,21 +90,22 @@ impl IntoResponse for AppError {
 
         (
             status,
-            Json(json!({
-                "error": {
-                    "message": message
-                }
-            })),
+            Json(ErrorEnvelope {
+                error: ErrorDetail { message },
+            }),
         )
             .into_response()
     }
 }
 
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Internal(err)
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(err: std::io::Error) -> Self {
         Self::Internal(err.into())
     }
 }

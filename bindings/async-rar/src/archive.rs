@@ -86,22 +86,22 @@ impl RarArchive {
         let mut open_data = unsafe { std::mem::zeroed::<ffi::RAROpenArchiveDataEx_Wrapper>() };
 
         // Set archive name
-        open_data.ArcName = c_path.as_ptr() as *mut _;
+        open_data.ArcName = c_path.as_ptr().cast_mut();
         open_data.OpenMode = mode.to_raw();
 
         // Allocate comment buffer
         let mut comment_buf = vec![0u8; 65536];
-        open_data.CmtBuf = comment_buf.as_mut_ptr() as *mut _;
+        open_data.CmtBuf = comment_buf.as_mut_ptr().cast();
         open_data.CmtBufSize = comment_buf.len() as u32;
 
-        let handle = unsafe { ffi::RAROpenArchiveEx_Wrapper(&mut open_data) };
+        let handle = unsafe { ffi::RAROpenArchiveEx_Wrapper(&raw mut open_data) };
 
         if handle.is_null() || open_data.OpenResult != 0 {
-            return Err(RarError::from_code(open_data.OpenResult as i32));
+            return Err(RarError::from_code(open_data.OpenResult.cast_signed()));
         }
 
         Ok(Self {
-            handle: handle as *mut _,
+            handle: handle.cast(),
             path: path_str.to_string(),
         })
     }
@@ -110,7 +110,7 @@ impl RarArchive {
     pub fn set_password(&mut self, password: &str) -> Result<()> {
         let c_password = CString::new(password).map_err(|_| RarError::InvalidPath)?;
         unsafe {
-            ffi::RARSetPassword(self.handle as *mut _, c_password.as_ptr() as *mut _);
+            ffi::RARSetPassword(self.handle.cast(), c_password.as_ptr().cast_mut());
         }
         Ok(())
     }
@@ -123,7 +123,7 @@ impl RarArchive {
             let mut header = unsafe { std::mem::zeroed::<ffi::RARHeaderDataEx_Wrapper>() };
 
             let result =
-                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle as *mut _, &mut header) };
+                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle.cast(), &raw mut header) };
 
             if result == autocxx::c_int(ffi::RAR_END_ARCHIVE) {
                 break;
@@ -141,13 +141,14 @@ impl RarArchive {
 
             let entry = RarEntry {
                 name,
-                size: ((header.UnpSizeHigh as u64) << 32) | (header.UnpSize as u64),
-                compressed_size: ((header.PackSizeHigh as u64) << 32) | (header.PackSize as u64),
+                size: (u64::from(header.UnpSizeHigh) << 32) | u64::from(header.UnpSize),
+                compressed_size: (u64::from(header.PackSizeHigh) << 32)
+                    | u64::from(header.PackSize),
                 is_directory: (header.Flags & 0x10) != 0, // RHDF_DIRECTORY
                 is_encrypted: (header.Flags & 0x04) != 0, // RHDF_ENCRYPTED
                 crc: header.FileCRC,
                 attributes: header.FileAttr,
-                mtime: header.MtimeLow as u64 | ((header.MtimeHigh as u64) << 32),
+                mtime: u64::from(header.MtimeLow) | (u64::from(header.MtimeHigh) << 32),
             };
 
             entries.push(entry);
@@ -155,7 +156,7 @@ impl RarArchive {
             // Skip to next entry
             let skip_result = unsafe {
                 ffi::RARProcessFile(
-                    self.handle as *mut _,
+                    self.handle.cast(),
                     autocxx::c_int(ffi::RAR_SKIP),
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -180,7 +181,7 @@ impl RarArchive {
             let mut header = unsafe { std::mem::zeroed::<ffi::RARHeaderDataEx_Wrapper>() };
 
             let result =
-                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle as *mut _, &mut header) };
+                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle.cast(), &raw mut header) };
 
             if result == autocxx::c_int(ffi::RAR_END_ARCHIVE) {
                 break;
@@ -192,9 +193,9 @@ impl RarArchive {
 
             let extract_result = unsafe {
                 ffi::RARProcessFile(
-                    self.handle as *mut _,
+                    self.handle.cast(),
                     autocxx::c_int(ffi::RAR_EXTRACT),
-                    c_dest.as_ptr() as *mut _,
+                    c_dest.as_ptr().cast_mut(),
                     ptr::null_mut(),
                 )
             };
@@ -219,11 +220,11 @@ impl RarArchive {
     {
         // Trait object to pass safe pointer
         let mut trait_obj: &mut dyn FnMut(&[u8]) -> bool = &mut callback;
-        let user_data = &mut trait_obj as *mut _ as isize;
+        let user_data = &raw mut trait_obj as isize;
 
         unsafe {
             ffi::RARSetCallback_Wrapper(
-                self.handle as *mut _,
+                self.handle.cast(),
                 rar_callback as *const () as *mut autocxx::c_void,
                 autocxx::c_longlong(user_data as i64),
             );
@@ -232,7 +233,7 @@ impl RarArchive {
         loop {
             let mut header = unsafe { std::mem::zeroed::<ffi::RARHeaderDataEx_Wrapper>() };
             let result =
-                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle as *mut _, &mut header) };
+                unsafe { ffi::RARReadHeaderEx_Wrapper(self.handle.cast(), &raw mut header) };
 
             if result == autocxx::c_int(ffi::RAR_END_ARCHIVE) {
                 break;
@@ -252,7 +253,7 @@ impl RarArchive {
                 // Note: RAR_TEST + Callback receiving UCM_PROCESSDATA acts as extraction to memory
                 let process_result = unsafe {
                     ffi::RARProcessFile(
-                        self.handle as *mut _,
+                        self.handle.cast(),
                         autocxx::c_int(ffi::RAR_TEST),
                         ptr::null_mut(),
                         ptr::null_mut(),
@@ -265,19 +266,19 @@ impl RarArchive {
 
                 // We are done with this specific entry
                 return Ok(());
-            } else {
-                // Skip other entries
-                let skip_result = unsafe {
-                    ffi::RARProcessFile(
-                        self.handle as *mut _,
-                        autocxx::c_int(ffi::RAR_SKIP),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    )
-                };
-                if skip_result != autocxx::c_int(ffi::RAR_SUCCESS) {
-                    return Err(RarError::from_code(skip_result.into()));
-                }
+            }
+
+            // Skip other entries
+            let skip_result = unsafe {
+                ffi::RARProcessFile(
+                    self.handle.cast(),
+                    autocxx::c_int(ffi::RAR_SKIP),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if skip_result != autocxx::c_int(ffi::RAR_SUCCESS) {
+                return Err(RarError::from_code(skip_result.into()));
             }
         }
 
@@ -289,7 +290,7 @@ impl Drop for RarArchive {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
-                ffi::RARCloseArchive(self.handle as *mut _);
+                ffi::RARCloseArchive(self.handle.cast());
             }
         }
     }

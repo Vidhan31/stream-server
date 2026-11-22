@@ -1,17 +1,21 @@
 use crate::backend::{
     EngineStats, PeerStat, SubtitleTrack, TorrentHandle, priorities::PlaybackIntent,
 };
-use crate::cache::DataCache;
-use anyhow::Context;
+use crate::error::{EngineError, Result as EngineResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::files::FileHandle;
 use regex::Regex;
+use std::sync::LazyLock;
+
+static RE_SXE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[sS](\d+)[eE](\d+)").expect("valid regex"));
+static RE_XX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)x(\d+)").expect("valid regex"));
 
 type ProbeCell = Arc<OnceCell<Result<crate::hls::ProbeResult, String>>>;
 type ProbeInflight = HashMap<usize, ProbeCell>;
@@ -33,7 +37,6 @@ pub struct Engine<H: TorrentHandle> {
     probe_inflight: Mutex<ProbeInflight>,
     opensub_hash_cache: Mutex<HashMap<usize, String>>,
     opensub_hash_inflight: Mutex<OpensubHashInflight>,
-    pub data_cache: DataCache,
     /// Whether this torrent was paused by the idle seeding-disabled policy.
     /// A new playback request resumes it before making a file wanted.
     pub idle_paused: AtomicBool,
@@ -50,10 +53,6 @@ impl<H: TorrentHandle> Engine<H> {
             probe_inflight: Mutex::new(HashMap::new()),
             opensub_hash_cache: Mutex::new(HashMap::new()),
             opensub_hash_inflight: Mutex::new(HashMap::new()),
-            data_cache: moka::future::Cache::builder()
-                .weigher(|_key, value: &Arc<Vec<u8>>| value.len() as u32)
-                .max_capacity(64 * 1024 * 1024) // 64MB cache per engine
-                .build(),
             idle_paused: AtomicBool::new(false),
         }
     }
@@ -67,7 +66,7 @@ impl<H: TorrentHandle> Engine<H> {
         &self,
         file_idx: usize,
         fallback_url: &str,
-    ) -> anyhow::Result<crate::hls::ProbeResult> {
+    ) -> EngineResult<crate::hls::ProbeResult> {
         let cache = self.probe_cache.lock().await;
         if let Some(res) = cache.get(&file_idx) {
             if res.is_hls_ready() {
@@ -88,10 +87,11 @@ impl<H: TorrentHandle> Engine<H> {
 
         let inflight = {
             let mut probes = self.probe_inflight.lock().await;
-            probes
-                .entry(file_idx)
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            Arc::clone(
+                probes
+                    .entry(file_idx)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
         };
         let result = inflight
             .get_or_init(|| async {
@@ -110,7 +110,7 @@ impl<H: TorrentHandle> Engine<H> {
                 probes.remove(&file_idx);
             }
         }
-        let res = result.map_err(anyhow::Error::msg)?;
+        let res = result.map_err(EngineError::Probe)?;
 
         if res.is_hls_ready() {
             let mut cache = self.probe_cache.lock().await;
@@ -123,7 +123,7 @@ impl<H: TorrentHandle> Engine<H> {
         &self,
         file_idx: usize,
         fallback_url: &str,
-    ) -> anyhow::Result<crate::hls::ProbeResult> {
+    ) -> EngineResult<crate::hls::ProbeResult> {
         let startup = Instant::now();
         tracing::debug!(
             "[HLS STREAMING] Preparing file {} for HLS playback",
@@ -234,18 +234,15 @@ impl<H: TorrentHandle> Engine<H> {
         }
 
         if let Some(series) = series_info {
-            let re_sxe = Regex::new(r"[sS](\d+)[eE](\d+)").unwrap();
-            let re_xx = Regex::new(r"(\d+)x(\d+)").unwrap();
-
             let mut candidates = Vec::new();
             for (idx, length, filename) in &media_files {
                 let mut found_s = None;
                 let mut found_e = None;
 
-                if let Some(caps) = re_sxe.captures(filename) {
+                if let Some(caps) = RE_SXE.captures(filename) {
                     found_s = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok());
                     found_e = caps.get(2).and_then(|m| m.as_str().parse::<usize>().ok());
-                } else if let Some(caps) = re_xx.captures(filename) {
+                } else if let Some(caps) = RE_XX.captures(filename) {
                     found_s = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok());
                     found_e = caps.get(2).and_then(|m| m.as_str().parse::<usize>().ok());
                 }
@@ -429,10 +426,10 @@ impl<H: TorrentHandle> Engine<H> {
 
         // Use raw reader directly for better performance
         // The libtorrent backend reads from local files, caching adds overhead
-        Some(FileHandle::new(length, name, reader, self.clone()))
+        Some(FileHandle::new(length, name, reader, Arc::clone(self)))
     }
 
-    pub async fn get_opensub_hash(self: &Arc<Self>, file_idx: usize) -> anyhow::Result<String> {
+    pub async fn get_opensub_hash(self: &Arc<Self>, file_idx: usize) -> EngineResult<String> {
         if !self.handle.manages_playback_lifecycle() {
             return self.calculate_opensub_hash(file_idx).await;
         }
@@ -442,10 +439,11 @@ impl<H: TorrentHandle> Engine<H> {
 
         let inflight = {
             let mut hashes = self.opensub_hash_inflight.lock().await;
-            hashes
-                .entry(file_idx)
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            Arc::clone(
+                hashes
+                    .entry(file_idx)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
         };
         let result = inflight
             .get_or_init(|| async {
@@ -476,26 +474,30 @@ impl<H: TorrentHandle> Engine<H> {
                     .insert(file_idx, hash.clone());
                 Ok(hash)
             }
-            Err(error) => Err(anyhow::anyhow!(error)),
+            Err(error) => Err(EngineError::Other(error)),
         }
     }
 
-    async fn calculate_opensub_hash(self: &Arc<Self>, file_idx: usize) -> anyhow::Result<String> {
+    async fn calculate_opensub_hash(self: &Arc<Self>, file_idx: usize) -> EngineResult<String> {
         let files = self.handle.get_files().await;
         if file_idx >= files.len() {
-            return Err(anyhow::anyhow!("File not found"));
+            return Err(EngineError::FileIndexOutOfRange {
+                index: file_idx,
+                max: files.len(),
+            });
         }
         let file_len = files[file_idx].length;
 
         let file_opt = self.get_file(file_idx, 0, 255).await;
-        let mut file = file_opt.context("failed to get file handle")?;
+        let mut file = file_opt.ok_or_else(|| {
+            EngineError::FileNotFound(format!("File handle {file_idx} unavailable"))
+        })?;
 
         let chunk_size = 65536u64;
         let head_size = std::cmp::min(file_len, chunk_size);
         let tail_size = std::cmp::min(file_len, chunk_size);
 
         let mut head = vec![0u8; head_size as usize];
-        use tokio::io::AsyncReadExt;
         file.seek(std::io::SeekFrom::Start(0)).await?;
         file.read_exact(&mut head).await?;
 
@@ -520,7 +522,7 @@ impl<H: TorrentHandle> Engine<H> {
             hash = hash.wrapping_add(u64::from_le_bytes(buf));
         }
 
-        Ok(format!("{:016x}", hash))
+        Ok(format!("{hash:016x}"))
     }
 
     pub async fn find_subtitle_tracks(&self) -> Vec<SubtitleTrack> {
@@ -560,8 +562,7 @@ impl<H: TorrentHandle> Engine<H> {
                 let path = std::path::PathBuf::from(&f.name);
                 path.extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| video_extensions.contains(&e.to_lowercase().as_str()))
-                    .unwrap_or(false)
+                    .is_some_and(|e| video_extensions.contains(&e.to_lowercase().as_str()))
             })
             .max_by_key(|(_, f)| f.length);
 
@@ -621,7 +622,7 @@ impl<H: TorrentHandle> Engine<H> {
         tracks
     }
 
-    pub async fn get_peer_stats(&self) -> Vec<PeerStat> {
+    pub fn get_peer_stats(&self) -> Vec<PeerStat> {
         // Placeholder for now, handle stats() returns EngineStats which has peers count but not per-peer stats yet
         Vec::new()
     }
@@ -631,25 +632,29 @@ impl<H: TorrentHandle> Engine<H> {
         &self,
         file_idx: usize,
         track_id: usize,
-    ) -> anyhow::Result<String> {
+    ) -> EngineResult<String> {
         // Special ID format: 1000 + stream_index
         if track_id < 1000 {
-            return Err(anyhow::anyhow!("Invalid embedded track ID"));
+            return Err(EngineError::InvalidTrack(format!(
+                "Invalid embedded track ID: {track_id}"
+            )));
         }
         let stream_index = track_id - 1000;
 
-        let file_path = self
-            .handle
-            .get_file_path(file_idx)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("File not found locally"))?;
+        let file_path = self.handle.get_file_path(file_idx).await.ok_or_else(|| {
+            EngineError::FileNotFound(format!("File {file_idx} not found locally"))
+        })?;
 
         // Prepare file for streaming first to ensure we have enough data
-        self.handle.prepare_file_for_streaming(file_idx).await?;
+        self.handle
+            .prepare_file_for_streaming(file_idx)
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))?;
 
         // Use ffmpeg to extract and convert to VTT
         // ffmpeg -i input.mkv -map 0:s:INDEX -c:s webvtt -f webvtt -
         let mut cmd = tokio::process::Command::new("ffmpeg");
+        cmd.kill_on_drop(true);
 
         // Add hardware acceleration flags if available (might speed up decoding even for subs)
         cmd.arg("-y"); // Overwrite output (though we output to stdout)
@@ -658,7 +663,7 @@ impl<H: TorrentHandle> Engine<H> {
         // Map the specific subtitle stream
         // Note: stream_index from probe is absolute index among subtitles
         // So we use -map 0:s:INDEX
-        cmd.args(["-map", &format!("0:s:{}", stream_index)]);
+        cmd.args(["-map", &format!("0:s:{stream_index}")]);
 
         // Convert to WebVTT
         cmd.args(["-c:s", "webvtt"]);
@@ -671,11 +676,13 @@ impl<H: TorrentHandle> Engine<H> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("FFmpeg extraction failed: {}", stderr));
+            return Err(EngineError::Extraction(format!(
+                "FFmpeg extraction failed: {stderr}"
+            )));
         }
 
         let content =
-            String::from_utf8(output.stdout).context("Invalid UTF-8 in extracted subtitles")?;
+            String::from_utf8(output.stdout).map_err(|e| EngineError::Extraction(e.to_string()))?;
 
         Ok(content)
     }
@@ -684,9 +691,11 @@ impl<H: TorrentHandle> Engine<H> {
 /// Helper to probe for embedded subtitles using ffprobe
 async fn probe_embedded_subtitles(
     path: &str,
-) -> anyhow::Result<Vec<(usize, Option<String>, Option<String>)>> {
+) -> EngineResult<Vec<(usize, Option<String>, Option<String>)>> {
     tracing::info!("[SUBTITLES] Executing ffprobe on: {}", path);
-    let output = tokio::process::Command::new("ffprobe")
+    let mut cmd = tokio::process::Command::new("ffprobe");
+    cmd.kill_on_drop(true);
+    let output = cmd
         .args([
             "-v",
             "quiet",
@@ -703,7 +712,7 @@ async fn probe_embedded_subtitles(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("[SUBTITLES] ffprobe command failed: {}", stderr);
-        return Err(anyhow::anyhow!("ffprobe failed"));
+        return Err(EngineError::Probe(format!("ffprobe failed: {stderr}")));
     }
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;

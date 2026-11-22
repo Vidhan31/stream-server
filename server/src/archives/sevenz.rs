@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub struct SevenZHandler {
+pub(crate) struct SevenZHandler {
     path: Option<PathBuf>,
     _reader: Arc<Mutex<Option<Box<dyn AsyncSeekableReader>>>>,
     cache_config: CacheConfig,
@@ -15,7 +15,7 @@ pub struct SevenZHandler {
 
 impl SevenZHandler {
     #[allow(dead_code)]
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path: Some(path),
             _reader: Arc::new(Mutex::new(None)),
@@ -23,7 +23,7 @@ impl SevenZHandler {
         }
     }
 
-    pub fn new_with_config(path: PathBuf, cache_config: CacheConfig) -> Self {
+    pub(crate) fn new_with_config(path: PathBuf, cache_config: CacheConfig) -> Self {
         Self {
             path: Some(path),
             _reader: Arc::new(Mutex::new(None)),
@@ -31,7 +31,7 @@ impl SevenZHandler {
         }
     }
 
-    pub fn new_with_reader(reader: Box<dyn AsyncSeekableReader>) -> Self {
+    pub(crate) fn new_with_reader(reader: Box<dyn AsyncSeekableReader>) -> Self {
         Self {
             path: None,
             _reader: Arc::new(Mutex::new(Some(reader))),

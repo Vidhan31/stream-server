@@ -11,20 +11,25 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize)]
+struct UpdateErrorResponse<'a> {
+    success: bool,
+    error: &'a str,
+}
 use std::net::SocketAddr;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct CheckRequest {
+pub(crate) struct CheckRequest {
     #[serde(default)]
     pub force: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct InstallRequest {
+pub(crate) struct InstallRequest {
     #[serde(default)]
     pub force: bool,
 }
@@ -43,16 +48,16 @@ impl IntoResponse for LocalOnly {
     fn into_response(self) -> Response {
         (
             StatusCode::FORBIDDEN,
-            Json(json!({
-                "success": false,
-                "error": "update endpoints are local-only"
-            })),
+            Json(UpdateErrorResponse {
+                success: false,
+                error: "update endpoints are local-only",
+            }),
         )
             .into_response()
     }
 }
 
-pub fn router() -> Router<AppState> {
+pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
         .route("/changelog", get(changelog))
@@ -98,7 +103,7 @@ async fn check(
         return response.into_response();
     }
 
-    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let request = payload.map_or_default(|Json(payload)| payload);
     let settings = state.settings.read().await.clone();
     match state
         .updater
@@ -133,7 +138,7 @@ async fn install(
         return response.into_response();
     }
 
-    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let request = payload.map_or_default(|Json(payload)| payload);
     match state.updater.install_update(&state, request.force).await {
         Ok(status) => {
             if state.update_install_exit_enabled {
@@ -171,10 +176,10 @@ fn update_error(err: crate::updater::error::UpdateError) -> Response {
     let status = http_status_for_error(err.kind);
     (
         status,
-        Json(json!({
-            "success": false,
-            "error": err.message
-        })),
+        Json(UpdateErrorResponse {
+            success: false,
+            error: &err.message,
+        }),
     )
         .into_response()
 }

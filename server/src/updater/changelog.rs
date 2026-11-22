@@ -18,7 +18,7 @@ const CHANGELOG_CACHE_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChangelogResponse {
+pub(crate) struct ChangelogResponse {
     pub current_version: String,
     pub latest_version: Option<String>,
     pub tag: Option<String>,
@@ -32,7 +32,7 @@ pub struct ChangelogResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ChangelogState {
+pub(crate) enum ChangelogState {
     Loaded,
     UpToDate,
     Offline,
@@ -42,7 +42,7 @@ pub enum ChangelogState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChangelogSection {
+pub(crate) struct ChangelogSection {
     pub title: String,
     pub items: Vec<String>,
 }
@@ -54,9 +54,10 @@ struct CachedChangelog {
 }
 
 static CHANGELOG_CACHE: OnceLock<RwLock<HashMap<&'static str, CachedChangelog>>> = OnceLock::new();
-static MARKDOWN_LINK_RE: OnceLock<Regex> = OnceLock::new();
+static MARKDOWN_LINK_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").expect("valid regex"));
 
-pub async fn latest_changelog(channel: UpdateChannel, force: bool) -> ChangelogResponse {
+pub(crate) async fn latest_changelog(channel: UpdateChannel, force: bool) -> ChangelogResponse {
     if !force && let Some(response) = cached_response(channel).await {
         return response;
     }
@@ -179,8 +180,7 @@ fn select_latest_changelog_release(
 
         let replace = selected
             .as_ref()
-            .map(|(selected_version, _)| version > *selected_version)
-            .unwrap_or(true);
+            .is_none_or(|(selected_version, _)| version > *selected_version);
         if replace {
             selected = Some((version, release.clone()));
         }
@@ -189,7 +189,7 @@ fn select_latest_changelog_release(
     selected
 }
 
-pub fn parse_changelog_sections(body: &str) -> Vec<ChangelogSection> {
+pub(crate) fn parse_changelog_sections(body: &str) -> Vec<ChangelogSection> {
     let mut sections = Vec::new();
     let mut current_title: Option<String> = None;
     let mut current_items: Vec<String> = Vec::new();
@@ -329,8 +329,7 @@ fn clean_markdown_text(input: &str) -> String {
 }
 
 fn strip_markdown_links(input: &str) -> String {
-    let re = MARKDOWN_LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
-    re.replace_all(input, "$1").into_owned()
+    MARKDOWN_LINK_RE.replace_all(input, "$1").into_owned()
 }
 
 #[cfg(test)]

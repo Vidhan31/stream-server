@@ -539,10 +539,7 @@ impl tokio::io::AsyncRead for LibtorrentFileStream {
                             if next_piece > last_piece {
                                 break;
                             }
-                            if prefetch_cache
-                                .has_piece(&prefetch_info_hash, next_piece)
-                                .await
-                            {
+                            if prefetch_cache.has_piece(&prefetch_info_hash, next_piece) {
                                 continue;
                             }
                             if !prefetch_handle.have_piece(next_piece) {
@@ -554,9 +551,7 @@ impl tokio::io::AsyncRead for LibtorrentFileStream {
                                 next_piece,
                             );
                             if !data.is_empty() {
-                                prefetch_cache
-                                    .put_piece(&prefetch_info_hash, next_piece, data)
-                                    .await;
+                                prefetch_cache.put_piece(&prefetch_info_hash, next_piece, data);
                                 tracing::debug!(
                                     "Read-ahead: cached piece {} directly from memory",
                                     next_piece

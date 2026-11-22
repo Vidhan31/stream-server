@@ -5,6 +5,12 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use priorities::PlaybackIntent;
 
 #[cfg(feature = "libtorrent")]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::clone_on_ref_ptr,
+    clippy::unused_async_trait_impl
+)]
 pub mod libtorrent;
 
 pub mod metadata;
@@ -17,6 +23,52 @@ impl<T: AsyncRead + AsyncSeek + Unpin + Send + Sync> FileStreamTrait for T {}
 pub enum TorrentSource {
     Url(String),
     Bytes(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedingPolicy {
+    Enabled,
+    Disabled,
+}
+
+impl SeedingPolicy {
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl From<bool> for SeedingPolicy {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadThrottle {
+    Throttled,
+    Unthrottled,
+}
+
+impl UploadThrottle {
+    #[must_use]
+    pub fn is_throttled(self) -> bool {
+        matches!(self, Self::Throttled)
+    }
+}
+
+impl From<bool> for UploadThrottle {
+    fn from(throttled: bool) -> Self {
+        if throttled {
+            Self::Throttled
+        } else {
+            Self::Unthrottled
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -33,7 +85,7 @@ pub trait TorrentBackend: Send + Sync {
     async fn remove_torrent(&self, info_hash: &str) -> Result<()>;
     async fn list_torrents(&self) -> Vec<String>;
     async fn memory_diagnostics(&self) -> BackendMemoryDiagnostics;
-    fn set_seeding_enabled(&self, _enabled: bool) {}
+    fn set_seeding_enabled(&self, _policy: SeedingPolicy) {}
 }
 
 #[async_trait::async_trait]
@@ -85,7 +137,7 @@ pub trait TorrentHandle: Send + Sync + Clone {
     /// upload instead stops seeding while keeping the torrent connected, so a
     /// newly-requested file downloads immediately from the existing peers.
     /// `true` = clamp upload to a trickle; `false` = restore unlimited upload.
-    async fn set_upload_throttled(&self, _throttled: bool) -> Result<()> {
+    async fn set_upload_throttled(&self, _throttle: UploadThrottle) -> Result<()> {
         Ok(())
     }
     /// Keep a file minimally wanted so it continues downloading in the

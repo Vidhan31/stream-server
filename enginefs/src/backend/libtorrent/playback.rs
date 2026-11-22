@@ -1670,29 +1670,30 @@ impl LibtorrentPlaybackCoordinator {
             }
         }
 
-        let attempts = due_torrents
-            .into_iter()
-            .map(|(info_hash, entry, generation)| {
-                let coordinator = Arc::clone(self);
-                async move {
-                    let result = coordinator
-                        .perform_pause(&info_hash, &entry, generation, true)
-                        .await;
-                    (info_hash, entry, generation, result)
-                }
+        let mut join_set = tokio::task::JoinSet::new();
+        for (info_hash, entry, generation) in due_torrents {
+            let coordinator = Arc::clone(self);
+            join_set.spawn(async move {
+                let result = coordinator
+                    .perform_pause(&info_hash, &entry, generation, true)
+                    .await;
+                (info_hash, entry, generation, result)
             });
-        for (info_hash, entry, generation, result) in futures::future::join_all(attempts).await {
-            if let Err(error) = result {
-                tracing::warn!(
-                    info_hash = %info_hash,
-                    generation,
-                    %error,
-                    "Failed to confirm idle libtorrent pause"
-                );
-                let mut state = entry.state.lock().await;
-                if state.generation == generation {
-                    state.phase = LibtorrentNetworkPhase::PausePending;
-                    state.idle_deadline = Some(Instant::now() + PAUSE_RETRY_DELAY);
+        }
+        while let Some(res) = join_set.join_next().await {
+            if let Ok((info_hash, entry, generation, result)) = res {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        info_hash = %info_hash,
+                        generation,
+                        %error,
+                        "Failed to confirm idle libtorrent pause"
+                    );
+                    let mut state = entry.state.lock().await;
+                    if state.generation == generation {
+                        state.phase = LibtorrentNetworkPhase::PausePending;
+                        state.idle_deadline = Some(Instant::now() + PAUSE_RETRY_DELAY);
+                    }
                 }
             }
         }

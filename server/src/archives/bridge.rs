@@ -18,11 +18,11 @@ enum BridgeResponse {
 /// A synchronous Read+Seek implementation that proxies requests to an async backend.
 /// Usage: Use `create_bridge(async_reader)` to get the bridge and a future.
 /// You MUST spawn the future on a Tokio runtime.
-pub struct SyncReaderBridge {
+pub(crate) struct SyncReaderBridge {
     tx: tokio::sync::mpsc::UnboundedSender<(BridgeCommand, oneshot::Sender<BridgeResponse>)>,
 }
 
-pub struct AsyncBridgeBackend {
+pub(crate) struct AsyncBridgeBackend {
     // Hidden implementation detail handled by the future
 }
 
@@ -70,7 +70,7 @@ impl Seek for SyncReaderBridge {
 }
 
 // Factory function
-pub fn create_bridge(
+pub(crate) fn create_bridge(
     mut reader: Box<dyn crate::archives::AsyncSeekableReader>,
 ) -> (
     SyncReaderBridge,

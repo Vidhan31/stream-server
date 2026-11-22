@@ -11,7 +11,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StagedAssetPaths {
+pub(crate) struct StagedAssetPaths {
     pub server: PathBuf,
     pub runtime: PathBuf,
     pub updater: PathBuf,
@@ -21,7 +21,7 @@ pub struct StagedAssetPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StagedUpdate {
+pub(crate) struct StagedUpdate {
     pub version: String,
     pub tag: String,
     pub release_url: String,
@@ -30,7 +30,7 @@ pub struct StagedUpdate {
     pub hashes: HashMap<String, String>,
 }
 
-pub async fn stage_update(
+pub(crate) async fn stage_update(
     client: &reqwest::Client,
     staging_root: PathBuf,
     candidate: &UpdateCandidate,

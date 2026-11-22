@@ -1,7 +1,7 @@
 use crate::{diagnostics, state::AppState};
 use std::collections::HashSet;
 
-pub async fn install_blockers(state: &AppState) -> Vec<String> {
+pub(crate) async fn install_blockers(state: &AppState) -> Vec<String> {
     let mut blockers = Vec::new();
 
     if diagnostics::logging::active_direct_streams() > 0 {
@@ -28,7 +28,8 @@ pub async fn install_blockers(state: &AppState) -> Vec<String> {
         blockers.push("activeDownloads".to_string());
     }
 
-    if !state.archive_cache.is_empty() {
+    state.prune_expired_archive_sessions();
+    if state.has_active_archive_sessions() {
         blockers.push("activeArchiveSessions".to_string());
     }
 

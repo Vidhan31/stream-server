@@ -93,12 +93,12 @@ impl Default for PieceWaiterRegistry {
 #[cfg(test)]
 mod tests {
     use super::PieceWaiterRegistry;
-    use futures::task::noop_waker;
+    use std::task::Waker;
 
     #[test]
     fn register_replaces_waker_for_same_stream() {
         let registry = PieceWaiterRegistry::new();
-        let waker = noop_waker();
+        let waker = Waker::noop().clone();
 
         registry.register("ABC", 7, 1, waker.clone());
         registry.register("abc", 7, 1, waker.clone());
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn unregister_stream_removes_stale_waiters() {
         let registry = PieceWaiterRegistry::new();
-        let waker = noop_waker();
+        let waker = Waker::noop().clone();
 
         registry.register("abc", 7, 1, waker.clone());
         registry.register("abc", 7, 2, waker.clone());

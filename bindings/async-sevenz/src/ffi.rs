@@ -51,7 +51,7 @@ pub unsafe extern "C" fn rust_read_cb(
     size: u32,
     processed: *mut u32,
 ) -> i32 {
-    let ctx = unsafe { &*(ctx as *mut RustReaderContext) };
+    let ctx = unsafe { &*ctx.cast::<RustReaderContext>() };
     let (resp_tx, resp_rx) = std_mpsc::channel();
 
     if ctx.tx.send((ReaderRequest::Read(size), resp_tx)).is_err() {
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn rust_read_cb(
         Ok(ReaderResponse::Read(data)) => {
             unsafe {
                 let bytes_to_copy = std::cmp::min(size as usize, data.len());
-                std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, bytes_to_copy);
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buf.cast::<u8>(), bytes_to_copy);
                 *processed = bytes_to_copy as u32;
             }
             0 // S_OK
@@ -78,7 +78,7 @@ pub unsafe extern "C" fn rust_seek_cb(
     origin: u32,
     new_pos: *mut u64,
 ) -> i32 {
-    let ctx = unsafe { &*(ctx as *mut RustReaderContext) };
+    let ctx = unsafe { &*ctx.cast::<RustReaderContext>() };
     let (resp_tx, resp_rx) = std_mpsc::channel();
 
     if ctx

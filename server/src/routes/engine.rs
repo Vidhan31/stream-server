@@ -2,17 +2,26 @@ use crate::error::{AppError, AppResult};
 use crate::routes::compat;
 use crate::state::AppState;
 use axum::extract::{Json, State};
-use enginefs::backend::TorrentHandle;
-use hex;
-use serde::Deserialize;
-use serde_json::json;
+use enginefs::backend::{EngineStats, TorrentHandle};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct EmptyResponse {}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct EngineStatsResponse {
+    #[serde(flatten)]
+    pub stats: EngineStats,
+    #[serde(rename = "guessedFileIdx", skip_serializing_if = "Option::is_none")]
+    pub guessed_file_idx: Option<usize>,
+}
+
 #[derive(Deserialize)]
-pub struct CreateEngineRequest {
-    pub from: Option<String>, // Magnet link or URL
+pub(crate) struct CreateEngineRequest {
+    pub from: Option<String>,
     #[serde(alias = "blob")]
-    pub torrent: Option<String>, // Torrent blob (hex encoded) - alias "blob" for stremio-core compat
+    pub torrent: Option<String>,
     pub announce: Option<Vec<String>>,
     #[serde(rename = "peerSearch")]
     pub peer_search: Option<PeerSearchBody>,
@@ -23,18 +32,18 @@ pub struct CreateEngineRequest {
 }
 
 #[derive(Deserialize)]
-pub struct PeerSearchBody {
+pub(crate) struct PeerSearchBody {
     #[serde(default)]
     pub sources: Vec<String>,
 }
 
-pub async fn create_engine(
+pub(crate) async fn create_engine(
     State(state): State<AppState>,
     Json(payload): Json<CreateEngineRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<EngineStatsResponse>> {
     let source = if let Some(hex_str) = payload.torrent {
         let bytes = hex::decode(hex_str)
-            .map_err(|e| AppError::bad_request(format!("Invalid hex blob: {}", e)))?;
+            .map_err(|e| AppError::bad_request(format!("Invalid hex blob: {e}")))?;
         enginefs::backend::TorrentSource::Bytes(bytes)
     } else if let Some(from) = payload.from {
         enginefs::backend::TorrentSource::Url(from)
@@ -50,39 +59,39 @@ pub async fn create_engine(
         .stream_engine()
         .add_torrent(source, Some(trackers))
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add torrent: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add torrent: {e}")))?;
 
     let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
     Ok(Json(stats))
 }
-pub async fn list_engines(State(state): State<AppState>) -> impl IntoResponse {
+
+pub(crate) async fn list_engines(State(state): State<AppState>) -> Json<Vec<String>> {
     let engines = state.stream_engine().list_engines().await;
-    Json(json!(engines))
+    Json(engines)
 }
 
-pub async fn remove_engine(
+pub(crate) async fn remove_engine(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
-) -> impl IntoResponse {
+) -> Json<EmptyResponse> {
     state
         .stream_engine()
         .remove_engine(&info_hash.to_lowercase())
         .await;
-    Json(json!({}))
+    Json(EmptyResponse {})
 }
 
-pub async fn remove_all_engines(State(state): State<AppState>) -> impl IntoResponse {
+pub(crate) async fn remove_all_engines(State(state): State<AppState>) -> Json<EmptyResponse> {
     let engine_fs = state.stream_engine();
     let engines = engine_fs.list_engines().await;
     for ih in engines {
         engine_fs.remove_engine(&ih).await;
     }
-    Json(json!({}))
+    Json(EmptyResponse {})
 }
 
-/// Stremio-core /{infoHash}/create endpoint for magnet links
 #[derive(Deserialize)]
-pub struct CreateMagnetRequest {
+pub(crate) struct CreateMagnetRequest {
     pub stream: Option<CreateMagnetStream>,
     #[serde(rename = "peerSearch")]
     pub peer_search: Option<PeerSearchBody>,
@@ -93,26 +102,23 @@ pub struct CreateMagnetRequest {
 }
 
 #[derive(Deserialize)]
-pub struct CreateMagnetStream {
+pub(crate) struct CreateMagnetStream {
     #[serde(rename = "infoHash")]
     pub info_hash: Option<String>,
 }
 
-pub async fn create_magnet(
+pub(crate) async fn create_magnet(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
     Json(payload): Json<CreateMagnetRequest>,
-) -> AppResult<Json<serde_json::Value>> {
-    // Use the info_hash from path or body
+) -> AppResult<Json<EngineStatsResponse>> {
     let ih = payload
         .stream
         .as_ref()
         .and_then(|s| s.info_hash.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or(&info_hash);
+        .map_or(info_hash.as_str(), |s| s.as_str());
 
-    // Create magnet URL from info hash
-    let magnet = format!("magnet:?xt=urn:btih:{}", ih);
+    let magnet = format!("magnet:?xt=urn:btih:{ih}");
     let source = enginefs::backend::TorrentSource::Url(magnet);
 
     let trackers = merged_trackers(None, payload.peer_search);
@@ -123,24 +129,24 @@ pub async fn create_magnet(
         .stream_engine()
         .add_torrent(source, Some(trackers))
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {e}")))?;
 
     let stats = stats_with_guess(&engine, &file_must_include, should_guess).await;
     Ok(Json(stats))
 }
 
-pub async fn create_magnet_get(
+pub(crate) async fn create_magnet_get(
     State(state): State<AppState>,
     axum::extract::Path(info_hash): axum::extract::Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
-    let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+) -> AppResult<Json<EngineStatsResponse>> {
+    let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
     let source = enginefs::backend::TorrentSource::Url(magnet);
 
     let engine = state
         .stream_engine()
         .add_torrent(source, None)
         .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to add magnet: {e}")))?;
 
     let stats = stats_with_guess(&engine, &[], false).await;
     Ok(Json(stats))
@@ -169,15 +175,17 @@ async fn stats_with_guess<H>(
     engine: &Arc<enginefs::engine::Engine<H>>,
     filters: &[String],
     should_guess: bool,
-) -> serde_json::Value
+) -> EngineStatsResponse
 where
     H: TorrentHandle,
 {
     let stats = engine.get_statistics().await;
-    let mut value = serde_json::to_value(stats).unwrap_or_else(|_| json!({}));
 
     if filters.is_empty() && !should_guess {
-        return value;
+        return EngineStatsResponse {
+            stats,
+            guessed_file_idx: None,
+        };
     }
 
     let files = engine.handle.get_files().await;
@@ -191,11 +199,10 @@ where
         })
         .collect::<Vec<_>>();
 
-    if let Ok(idx) = compat::resolve_file_idx("-1", &candidates, filters)
-        && let Some(obj) = value.as_object_mut()
-    {
-        obj.insert("guessedFileIdx".to_string(), json!(idx));
-    }
+    let guessed_file_idx = compat::resolve_file_idx("-1", &candidates, filters).ok();
 
-    value
+    EngineStatsResponse {
+        stats,
+        guessed_file_idx,
+    }
 }

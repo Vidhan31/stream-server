@@ -10,7 +10,7 @@ use std::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApplyPlan {
+pub(crate) struct ApplyPlan {
     pub target_version: String,
     pub parent_pid: u32,
     pub restart_command: Vec<String>,
@@ -24,13 +24,13 @@ pub struct ApplyPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApplyAsset {
+pub(crate) struct ApplyAsset {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub sha256: String,
 }
 
-pub fn prepare_apply_plan(
+pub(crate) fn prepare_apply_plan(
     staged: &StagedUpdate,
     allow_stop_stremio: bool,
 ) -> Result<(PathBuf, PathBuf), UpdateError> {
@@ -111,7 +111,7 @@ pub fn prepare_apply_plan(
     Ok((helper, plan_path))
 }
 
-pub fn spawn_helper(helper: &Path, plan_path: &Path) -> Result<(), UpdateError> {
+pub(crate) fn spawn_helper(helper: &Path, plan_path: &Path) -> Result<(), UpdateError> {
     Command::new(helper)
         .arg("--apply")
         .arg(plan_path)

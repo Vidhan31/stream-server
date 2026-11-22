@@ -1,3 +1,9 @@
+#![allow(
+    unreachable_pub,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unwrap_used
+)]
+
 mod ffi;
 
 use crate::ffi::{ReaderRequest, ReaderResponse, RustReaderContext};
@@ -6,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio::sync::mpsc;
 use tokio::task;
 
+// SAFETY: SevenZArchive is owned and transferred between threads safely across await points.
 unsafe impl Send for ffi::SevenZArchive {}
 unsafe impl Sync for ffi::SevenZArchive {}
 
@@ -23,6 +30,8 @@ pub struct SevenZ {
     _context: Box<RustReaderContext>,
 }
 
+// SAFETY: SevenZ owns its underlying archive pointer and context and can be safely moved
+// and referenced across threads and await boundaries.
 unsafe impl Send for SevenZ {}
 unsafe impl Sync for SevenZ {}
 
@@ -76,7 +85,7 @@ impl SevenZ {
 
         // Create context
         let mut context = Box::new(RustReaderContext { tx });
-        let ctx_ptr = &mut *context as *mut RustReaderContext as *mut c_void;
+        let ctx_ptr = (&raw mut *context).cast::<c_void>();
         // Cast to autocxx::c_void pointer type (which wraps system c_void)
         // Since we can't easily construct autocxx::c_void, we assume the FFI function takes *mut autocxx::c_void
         // and we can cast our *mut c_void to it if the layout is compatible.
@@ -116,13 +125,13 @@ impl SevenZ {
 
             for i in 0..count {
                 let name_ptr = ffi::GetArchiveItemName(archive, autocxx::c_uint(i));
-                let name = if !name_ptr.is_null() {
+                let name = if name_ptr.is_null() {
+                    format!("{i}")
+                } else {
                     let c_str = CStr::from_ptr(name_ptr);
                     let s = c_str.to_string_lossy().to_string();
                     ffi::FreeString(name_ptr);
                     s
-                } else {
-                    format!("{}", i)
                 };
 
                 let is_dir =
@@ -198,10 +207,10 @@ pub unsafe extern "C" fn rust_write_cb(
     processed: *mut autocxx::c_uint,
 ) -> autocxx::c_int {
     unsafe {
-        let ctx = &mut *(ctx as *mut RustWriterContext);
-        let buf_slice = std::slice::from_raw_parts(buf as *const u8, size.0 as usize);
+        let ctx = &mut *ctx.cast::<RustWriterContext>();
+        let buf_slice = std::slice::from_raw_parts(buf.cast::<u8>(), size.0 as usize);
         match ctx.writer.write_all(buf_slice) {
-            Ok(_) => {
+            Ok(()) => {
                 if !processed.is_null() {
                     *processed = size;
                 }
@@ -229,7 +238,7 @@ impl SevenZ {
             let mut context = RustWriterContext {
                 writer: Box::new(writer),
             };
-            let callback_ctx = &mut context as *mut RustWriterContext as *mut autocxx::c_void;
+            let callback_ctx = (&raw mut context).cast::<autocxx::c_void>();
 
             let res = ffi::ExtractEntry(
                 archive_addr as *mut ffi::SevenZArchive,
@@ -237,10 +246,10 @@ impl SevenZ {
                 callback_ctx,
             );
 
-            if res != autocxx::c_int(0) {
-                Err(format!("Extraction failed with code {:?}", res).into())
-            } else {
+            if res == autocxx::c_int(0) {
                 Ok(())
+            } else {
+                Err(format!("Extraction failed with code {res:?}").into())
             }
         })
         .await?

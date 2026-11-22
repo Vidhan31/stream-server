@@ -1,23 +1,27 @@
-pub mod index;
-pub mod manifest;
-pub mod parser;
-pub mod resolver;
-pub mod scanner;
-pub mod torrent;
+pub(crate) mod index;
+pub(crate) mod manifest;
+pub(crate) mod models;
+pub(crate) mod parser;
+pub(crate) mod resolver;
+pub(crate) mod scanner;
+pub(crate) mod torrent;
 
 use self::manifest::get_manifest;
+use self::models::{
+    CatalogResponse, MetaDetail, MetaPreview, MetaResponse, MetaVideo, StreamBehaviorHints,
+    StreamItem, StreamResponse, TorrentStreamRef,
+};
 use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::{Path, State},
     routing::get,
 };
-use serde_json::{Value, json};
 
-pub use self::index::LocalIndex;
-pub use self::scanner::scan_background;
+pub(crate) use self::index::LocalIndex;
+pub(crate) use self::scanner::scan_background;
 
-pub fn get_router() -> Router<AppState> {
+pub(crate) fn get_router() -> Router<AppState> {
     Router::new()
         .route("/manifest.json", get(handle_manifest))
         .route("/catalog/{type}/{id}", get(handle_catalog))
@@ -30,32 +34,39 @@ async fn handle_manifest() -> Json<manifest::Manifest> {
     Json(get_manifest())
 }
 
-async fn handle_catalog(state: State<AppState>, path: Path<(String, String)>) -> Json<Value> {
+async fn handle_catalog(
+    state: State<AppState>,
+    path: Path<(String, String)>,
+) -> Json<CatalogResponse> {
     let (type_, id_ext) = path.0;
     let id = id_ext.strip_suffix(".json").unwrap_or(&id_ext).to_string();
-    _handle_catalog(state, type_, id, None)
+    dispatch_catalog(state, type_, id, None)
 }
 
 async fn handle_catalog_extra(
     state: State<AppState>,
     Path((type_, id, extra_ext)): Path<(String, String, String)>,
-) -> Json<Value> {
+) -> Json<CatalogResponse> {
     let extra = extra_ext
         .strip_suffix(".json")
         .unwrap_or(&extra_ext)
         .to_string();
-    _handle_catalog(state, type_, id, Some(extra))
+    dispatch_catalog(state, type_, id, Some(extra))
 }
 
-fn _handle_catalog(
+fn dispatch_catalog(
     State(state): State<AppState>,
     type_: String,
     _id: String,
     _extra: Option<String>,
-) -> Json<Value> {
+) -> Json<CatalogResponse> {
     // Simple catalog: Return everything matching the type
-    let items = state.local_index.items.read().unwrap();
-    let metas: Vec<Value> = items
+    let items = state
+        .local_index
+        .items
+        .read()
+        .expect("local index items lock poisoned");
+    let metas: Vec<MetaPreview> = items
         .values()
         .flatten()
         .filter(|item| item.metadata.type_ == type_)
@@ -66,24 +77,26 @@ fn _handle_catalog(
             acc
         })
         .values()
-        .map(|item| {
-            json!({
-                "id": item.id.clone(),
-                "type": item.metadata.type_,
-                "name": item.metadata.name.clone().unwrap_or("Unknown".to_string()),
-                "poster": null, // In future: fetch from Cinemeta if imdb_id exists
-                "description": format!("Local file: {}", item.path),
-            })
+        .map(|item| MetaPreview {
+            id: item.id.clone(),
+            r#type: item.metadata.type_.clone(),
+            name: item
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string()),
+            poster: None,
+            description: format!("Local file: {}", item.path),
         })
         .collect();
 
-    Json(json!({ "metas": metas }))
+    Json(CatalogResponse { metas })
 }
 
 async fn handle_meta(
     State(state): State<AppState>,
     Path((type_, id_ext)): Path<(String, String)>,
-) -> Json<Value> {
+) -> Json<MetaResponse> {
     let id = id_ext.strip_suffix(".json").unwrap_or(&id_ext).to_string();
 
     // Handle bt: prefix - query engine directly
@@ -91,73 +104,97 @@ async fn handle_meta(
         let info_hash = id.strip_prefix("bt:").unwrap_or(&id).to_lowercase();
         if let Some(engine) = state.stream_engine().get_engine(&info_hash).await {
             let stats = engine.get_statistics().await;
-            let videos: Vec<Value> = stats
+            let videos: Vec<MetaVideo> = stats
                 .files
                 .iter()
                 .enumerate()
-                .map(|(idx, file)| {
-                    json!({
-                        "id": format!("{}:{}", id, idx),
-                        "title": file.name.clone(),
-                        "released": "2020-01-01T00:00:00.000Z",
-                        "stream": {
-                            "infoHash": info_hash,
-                            "fileIdx": idx,
-                        }
-                    })
+                .map(|(idx, file)| MetaVideo {
+                    id: format!("{id}:{idx}"),
+                    title: Some(file.name.clone()),
+                    released: Some("2020-01-01T00:00:00.000Z".to_string()),
+                    season: None,
+                    episode: None,
+                    stream: Some(TorrentStreamRef {
+                        info_hash: info_hash.clone(),
+                        file_idx: idx,
+                    }),
                 })
                 .collect();
 
-            let meta = json!({
-                "id": id,
-                "type": type_,
-                "name": if stats.name.is_empty() { "Torrent".to_string() } else { stats.name.clone() },
-                "poster": Value::Null,
-                "description": "Torrent stream",
-                "showAsVideos": true,
-                "videos": videos,
-            });
-            return Json(json!({ "meta": meta }));
+            let meta = MetaDetail {
+                id,
+                r#type: type_,
+                name: Some(if stats.name.is_empty() {
+                    "Torrent".to_string()
+                } else {
+                    stats.name
+                }),
+                poster: None,
+                description: Some("Torrent stream".to_string()),
+                show_as_videos: Some(true),
+                videos,
+            };
+            return Json(MetaResponse { meta: Some(meta) });
         }
-        return Json(json!({ "meta": null }));
+        return Json(MetaResponse { meta: None });
     }
 
     // Handle local: prefix - use local index
-    let items_map = state.local_index.items.read().unwrap();
+    let items_map = state
+        .local_index
+        .items
+        .read()
+        .expect("local index items lock poisoned");
     if let Some(items) = items_map.get(&id)
         && let Some(first) = items.first()
     {
         // For series, we might want to list videos
-        let videos: Vec<Value> = items.iter().map(|it| {
-                 json!({
-                     "id": format!("{}:{}:{}", id, it.metadata.season.unwrap_or(1), it.metadata.episode.as_ref().map(|v| v[0]).unwrap_or(1)),
-                     "title": it.metadata.name.clone(),
-                     "season": it.metadata.season.unwrap_or(1),
-                     "episode": it.metadata.episode.as_ref().map(|v| v[0]).unwrap_or(1),
-                     "released": it.metadata.year.unwrap_or(2020).to_string(),
-                 })
-             }).collect();
+        let videos: Vec<MetaVideo> = items
+            .iter()
+            .map(|it| {
+                let season = it.metadata.season.unwrap_or(1);
+                let episode = it
+                    .metadata
+                    .episode
+                    .as_ref()
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(1);
+                MetaVideo {
+                    id: format!("{id}:{season}:{episode}"),
+                    title: it.metadata.name.clone(),
+                    season: Some(season),
+                    episode: Some(episode),
+                    released: Some(it.metadata.year.unwrap_or(2020).to_string()),
+                    stream: None,
+                }
+            })
+            .collect();
 
-        let meta = json!({
-            "id": id,
-            "type": type_,
-            "name": first.metadata.name,
-            "videos": videos,
-        });
-        return Json(json!({ "meta": meta }));
+        let meta = MetaDetail {
+            id,
+            r#type: type_,
+            name: first.metadata.name.clone(),
+            poster: None,
+            description: None,
+            show_as_videos: None,
+            videos,
+        };
+        return Json(MetaResponse { meta: Some(meta) });
     }
-    Json(json!({ "meta": null }))
+    Json(MetaResponse { meta: None })
 }
 
 async fn handle_stream(
     State(state): State<AppState>,
     Path((_type, id_ext)): Path<(String, String)>,
-) -> Json<Value> {
+) -> Json<StreamResponse> {
     let id = id_ext.strip_suffix(".json").unwrap_or(&id_ext);
 
     let parts: Vec<&str> = id.split(':').collect();
     if parts.len() < 2 {
-        return Json(json!({ "streams": [] }));
+        return Json(StreamResponse {
+            streams: Vec::new(),
+        });
     }
 
     // Handle bt: prefix - query engine directly
@@ -170,26 +207,33 @@ async fn handle_stream(
             let file_name = stats
                 .files
                 .get(file_idx)
-                .map(|f| f.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string());
-            return Json(json!({
-                "streams": [{
-                    "title": file_name,
-                    "infoHash": info_hash,
-                    "fileIdx": file_idx,
-                    "behaviorHints": {
-                        "notWebReady": false
-                    }
-                }]
-            }));
+                .map_or_else(|| "Unknown".to_string(), |f| f.name.clone());
+            return Json(StreamResponse {
+                streams: vec![StreamItem {
+                    title: file_name,
+                    info_hash: Some(info_hash),
+                    file_idx: Some(file_idx),
+                    url: None,
+                    behavior_hints: StreamBehaviorHints {
+                        not_web_ready: false,
+                        binge_group: None,
+                    },
+                }],
+            });
         }
-        return Json(json!({ "streams": [] }));
+        return Json(StreamResponse {
+            streams: Vec::new(),
+        });
     }
 
     // Handle local: prefix - use local index
     let base_id = format!("{}:{}", parts[0], parts[1]); // local:ttXXXX
 
-    let items_map = state.local_index.items.read().unwrap();
+    let items_map = state
+        .local_index
+        .items
+        .read()
+        .expect("local index items lock poisoned");
     if let Some(items) = items_map.get(&base_id) {
         // Filter by S:E if present
         let target_season = parts.get(2).and_then(|s| s.parse::<i32>().ok());
@@ -202,8 +246,7 @@ async fn handle_stream(
                         .metadata
                         .episode
                         .as_ref()
-                        .map(|e| e.contains(&target_episode.unwrap_or(1)))
-                        .unwrap_or(false)
+                        .is_some_and(|e| e.contains(&target_episode.unwrap_or(1)))
             } else {
                 true // Movie match
             }
@@ -212,56 +255,73 @@ async fn handle_stream(
         if let Some(item) = matched_item {
             if let (Some(info_hash), Some(file_idx)) = (&item.info_hash, item.file_idx) {
                 // Torrent Stream
-                return Json(json!({
-                    "streams": [{
-                        "title": item.metadata.name.clone().unwrap_or("Torrent File".to_string()),
-                        "infoHash": info_hash,
-                        "fileIdx": file_idx,
-                        "behaviorHints": {
-                            "notWebReady": false // Can stream via enginefs
-                        }
-                    }]
-                }));
-            } else {
-                // Check for archive path
-                if item.path.starts_with("archive:") {
-                    // path format: archive:{abs_path}|{internal_path}
-                    let content = item.path.strip_prefix("archive:").unwrap_or(&item.path);
-                    if let Some((archive_path, internal_path)) = content.split_once('|') {
-                        // Use /zip/stream generic endpoint (works for all supported types via factory)
-                        let url = format!(
-                            "{}/zip/stream?archive={}&file={}",
-                            state.base_url,
-                            urlencoding::encode(archive_path),
-                            urlencoding::encode(internal_path)
-                        );
-
-                        return Json(json!({
-                            "streams": [{
-                                "title": item.metadata.name.clone().unwrap_or("Archive File".to_string()),
-                                "url": url,
-                                "behaviorHints": {
-                                    "notWebReady": false, // It IS web ready via our HTTP proxy
-                                    "bingeGroup": format!("archive:{}", archive_path)
-                                }
-                            }]
-                        }));
-                    }
-                }
-
-                // Local File Stream
-                return Json(json!({
-                    "streams": [{
-                        "title": "Local File",
-                        "url": format!("file://{}", item.path),
-                        "behaviorHints": {
-                            "notWebReady": true
-                        }
-                    }]
-                }));
+                return Json(StreamResponse {
+                    streams: vec![StreamItem {
+                        title: item
+                            .metadata
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| "Torrent File".to_string()),
+                        info_hash: Some(info_hash.clone()),
+                        file_idx: Some(file_idx),
+                        url: None,
+                        behavior_hints: StreamBehaviorHints {
+                            not_web_ready: false, // Can stream via enginefs
+                            binge_group: None,
+                        },
+                    }],
+                });
             }
+
+            // Check for archive path
+            if item.path.starts_with("archive:") {
+                // path format: archive:{abs_path}|{internal_path}
+                let content = item.path.strip_prefix("archive:").unwrap_or(&item.path);
+                if let Some((archive_path, internal_path)) = content.split_once('|') {
+                    // Use /zip/stream generic endpoint (works for all supported types via factory)
+                    let url = format!(
+                        "{}/zip/stream?archive={}&file={}",
+                        state.base_url,
+                        urlencoding::encode(archive_path),
+                        urlencoding::encode(internal_path)
+                    );
+
+                    return Json(StreamResponse {
+                        streams: vec![StreamItem {
+                            title: item
+                                .metadata
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| "Archive File".to_string()),
+                            info_hash: None,
+                            file_idx: None,
+                            url: Some(url),
+                            behavior_hints: StreamBehaviorHints {
+                                not_web_ready: false, // It IS web ready via our HTTP proxy
+                                binge_group: Some(format!("archive:{archive_path}")),
+                            },
+                        }],
+                    });
+                }
+            }
+
+            // Local File Stream
+            return Json(StreamResponse {
+                streams: vec![StreamItem {
+                    title: "Local File".to_string(),
+                    info_hash: None,
+                    file_idx: None,
+                    url: Some(format!("file://{}", item.path)),
+                    behavior_hints: StreamBehaviorHints {
+                        not_web_ready: true,
+                        binge_group: None,
+                    },
+                }],
+            });
         }
     }
 
-    Json(json!({ "streams": [] }))
+    Json(StreamResponse {
+        streams: Vec::new(),
+    })
 }

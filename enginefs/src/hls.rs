@@ -1,11 +1,30 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::task::Poll;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
+
+static RE_DURATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Duration: (\d{2}):(\d{2}):(\d{2}(\.\d+)?)").expect("valid regex")
+});
+static RE_INPUT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Input #0, ([^,]+),").expect("valid regex"));
+static RE_STREAM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Stream #\d+:(\d+)(?:\(([^)]+)\))?: (Video|Audio): ([^,]+)").expect("valid regex")
+});
+static RE_DIM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d{3,4})x(\d{3,4})").expect("valid regex"));
+static RE_FPS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+(\.\d+)?) fps").expect("valid regex"));
+static RE_BITRATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+) kb/s").expect("valid regex"));
+static RE_CHANNELS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+)\s+channels?").expect("valid regex"));
 
 use crate::backend::SubtitleTrack;
 use crate::hwaccel::HwAccelConfig;
@@ -58,8 +77,7 @@ impl TranscodeConfig {
     pub fn uses_hardware_encoder(&self) -> bool {
         self.hwaccel
             .as_ref()
-            .map(|hw| hw.is_hardware())
-            .unwrap_or(false)
+            .is_some_and(super::hwaccel::HwAccelConfig::is_hardware)
     }
 
     pub fn force_software_encoder(&mut self, reason: &str) {
@@ -109,13 +127,11 @@ impl VideoStream {
 
         self.profile
             .as_deref()
-            .map(text_mentions_high_bit_depth)
-            .unwrap_or(false)
+            .is_some_and(text_mentions_high_bit_depth)
             || self
                 .pix_fmt
                 .as_deref()
-                .map(text_mentions_high_bit_depth)
-                .unwrap_or(false)
+                .is_some_and(text_mentions_high_bit_depth)
     }
 }
 
@@ -224,6 +240,7 @@ impl HlsEngine {
         probesize: u64,
     ) -> Result<ProbeResult> {
         let mut cmd = Command::new("ffmpeg");
+        cmd.kill_on_drop(true);
         cmd.arg("-analyzeduration").arg(analyzeduration.to_string());
         cmd.arg("-probesize").arg(probesize.to_string());
         cmd.arg("-i").arg(file_path);
@@ -244,18 +261,10 @@ impl HlsEngine {
         let mut container = "unknown".to_string();
         let mut streams = Vec::new();
 
-        let re_duration = Regex::new(r"Duration: (\d{2}):(\d{2}):(\d{2}(\.\d+)?)")?;
-        let re_input = Regex::new(r"Input #0, ([^,]+),")?;
-        let re_stream = Regex::new(r"Stream #\d+:(\d+)(?:\(([^)]+)\))?: (Video|Audio): ([^,]+)")?;
-        let re_dim = Regex::new(r"(\d{3,4})x(\d{3,4})")?;
-        let re_fps = Regex::new(r"(\d+(\.\d+)?) fps")?;
-        let re_bitrate = Regex::new(r"(\d+) kb/s")?;
-        let re_channels = Regex::new(r"(\d+)\s+channels?")?;
-
         while let Ok(Some(line)) = reader.next_line().await {
             let line = line.trim();
 
-            if let Some(caps) = re_input.captures(line)
+            if let Some(caps) = RE_INPUT.captures(line)
                 && let Some(formats) = caps.get(1)
             {
                 let fmts = formats.as_str().to_lowercase();
@@ -268,14 +277,14 @@ impl HlsEngine {
                 }
             }
 
-            if let Some(caps) = re_duration.captures(line) {
+            if let Some(caps) = RE_DURATION.captures(line) {
                 let h: f64 = caps[1].parse().unwrap_or(0.0);
                 let m: f64 = caps[2].parse().unwrap_or(0.0);
                 let s: f64 = caps[3].parse().unwrap_or(0.0);
                 duration = h * 3600.0 + m * 60.0 + s;
             }
 
-            if let Some(caps) = re_stream.captures(line) {
+            if let Some(caps) = RE_STREAM.captures(line) {
                 let index: usize = caps[1].parse().unwrap_or(0);
                 let lang = caps.get(2).map(|m| m.as_str().to_string());
                 let type_str = caps[3].to_lowercase();
@@ -300,16 +309,16 @@ impl HlsEngine {
                     None
                 };
 
-                let width = re_dim.captures(line).and_then(|c| c[1].parse().ok());
-                let height = re_dim.captures(line).and_then(|c| c[2].parse().ok());
-                let fps = re_fps.captures(line).and_then(|c| c[1].parse().ok());
-                let channels = parse_audio_channels(line, &re_channels);
+                let width = RE_DIM.captures(line).and_then(|c| c[1].parse().ok());
+                let height = RE_DIM.captures(line).and_then(|c| c[2].parse().ok());
+                let fps = RE_FPS.captures(line).and_then(|c| c[1].parse().ok());
+                let channels = parse_audio_channels(line, &RE_CHANNELS);
                 let pix_fmt = if type_str == "video" {
                     parse_video_pixel_format(line)
                 } else {
                     None
                 };
-                let bitrate = re_bitrate
+                let bitrate = RE_BITRATE
                     .captures(line)
                     .and_then(|c| c[1].parse().ok().map(|kb: u64| kb * 1000));
 
@@ -383,15 +392,11 @@ impl HlsEngine {
             // URI for VTT subtitles
             // Uses the existing VTT endpoint: /{infoHash}/{fileIdx}/subtitles.vtt
             // But we need to use the sub.id which is the file_idx for the subtitle file
-            let sub_uri = format!(
-                "{}/{}/{}/subtitles.vtt?{}",
-                base_url, info_hash, sub.id, query_str
+            let _ = writeln!(
+                m3u,
+                "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{subs_group_id}\",LANGUAGE=\"{lang}\",NAME=\"{name}\",DEFAULT={is_default},AUTOSELECT={is_autoselect},URI=\"{base_url}/{info_hash}/{sub_id}/subtitles.vtt?{query_str}\"",
+                sub_id = sub.id
             );
-
-            m3u.push_str(&format!(
-                "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{}\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT={},URI=\"{}\"\n",
-                subs_group_id, lang, name, is_default, is_autoselect, sub_uri
-            ));
         }
 
         // Collect audio streams from probe
@@ -415,17 +420,18 @@ impl HlsEngine {
             let is_autoselect = is_default;
 
             // Use global stream index (audio.index) in URL for robustness
-            m3u.push_str(&format!(
-                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT={},URI=\"{}/hlsv2/{}/{}/audio-{}.m3u8?{}\"\n",
-                audio_group_id, lang, name, is_default, is_autoselect, base_url, info_hash, file_idx, audio.index, query_str
-            ));
+            let _ = writeln!(
+                m3u,
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{audio_group_id}\",LANGUAGE=\"{lang}\",NAME=\"{name}\",DEFAULT={is_default},AUTOSELECT={is_autoselect},URI=\"{base_url}/hlsv2/{info_hash}/{file_idx}/audio-{audio_idx}.m3u8?{query_str}\"",
+                audio_idx = audio.index
+            );
         }
 
         // Video stream with audio group reference
-        let bandwidth = if config.video_bitrate.ends_with("M") {
+        let bandwidth = if config.video_bitrate.ends_with('M') {
             config
                 .video_bitrate
-                .trim_end_matches("M")
+                .trim_end_matches('M')
                 .parse::<u64>()
                 .unwrap_or(12)
                 * 1_000_000
@@ -436,33 +442,20 @@ impl HlsEngine {
         // High profile codecs for browser
         let codecs = "avc1.640028,mp4a.40.2"; // High Profile Level 4.0
 
-        if !audio_streams.is_empty() {
-            let mut line = format!(
-                "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\",AUDIO=\"{}\"",
-                bandwidth, codecs, audio_group_id
-            );
-            if has_subtitles {
-                line.push_str(&format!(",SUBTITLES=\"{}\"", subs_group_id));
-            }
-            m3u.push_str(&line);
-            m3u.push('\n');
+        let audio_attr = if audio_streams.is_empty() {
+            String::new()
         } else {
-            let mut line = format!(
-                "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
-                bandwidth, codecs
-            );
-            if has_subtitles {
-                line.push_str(&format!(",SUBTITLES=\"{}\"", subs_group_id));
-            }
-            m3u.push_str(&line);
-            m3u.push('\n');
-        }
-
-        // Video stream playlist URL
-        m3u.push_str(&format!(
-            "{}/hlsv2/{}/{}/stream-0.m3u8?{}\n",
-            base_url, info_hash, file_idx, query_str
-        ));
+            format!(",AUDIO=\"{audio_group_id}\"")
+        };
+        let subs_attr = if has_subtitles {
+            format!(",SUBTITLES=\"{subs_group_id}\"")
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            m3u,
+            "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codecs}\"{audio_attr}{subs_attr}\n{base_url}/hlsv2/{info_hash}/{file_idx}/stream-0.m3u8?{query_str}"
+        );
 
         m3u
     }
@@ -493,24 +486,21 @@ impl HlsEngine {
             .max()
             .unwrap_or(4);
 
-        let mut m3u = String::from("#EXTM3U\n");
-        m3u.push_str("#EXT-X-VERSION:3\n");
-        m3u.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", max_duration));
-        m3u.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
-        m3u.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        let mut m3u = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
+        let _ = writeln!(m3u, "#EXT-X-TARGETDURATION:{max_duration}");
+        m3u.push_str("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n");
 
         // MPEG-TS segments (no init segment required)
         for (i, (_start, dur)) in segments.iter().enumerate() {
-            m3u.push_str(&format!("#EXTINF:{:.6},\n", dur));
-            let filename = if let Some(audio_idx) = audio_track_idx {
-                format!(
-                    "{}audio-{}-{}.ts?{}",
-                    segment_base_url, audio_idx, i, query_str
-                )
+            let _ = writeln!(m3u, "#EXTINF:{dur:.6},");
+            if let Some(audio_idx) = audio_track_idx {
+                let _ = writeln!(
+                    m3u,
+                    "{segment_base_url}audio-{audio_idx}-{i}.ts?{query_str}"
+                );
             } else {
-                format!("{}{}.ts?{}", segment_base_url, i, query_str)
-            };
-            m3u.push_str(&format!("{}\n", filename));
+                let _ = writeln!(m3u, "{segment_base_url}{i}.ts?{query_str}");
+            }
         }
         m3u.push_str("#EXT-X-ENDLIST\n");
         m3u
@@ -518,7 +508,7 @@ impl HlsEngine {
 
     /// Transcode video-only segment for HLS V2
     /// Implements exact logic from ebml_933.js
-    pub async fn transcode_video_segment(
+    pub fn transcode_video_segment(
         input_path: &str,
         start: f64,
         duration: f64,
@@ -571,7 +561,7 @@ impl HlsEngine {
 
         // Input seeking (fast, coarse) - BEFORE -i
         if input_seek > 0.0 {
-            cmd.arg("-ss").arg(format!("{:.3}", input_seek));
+            cmd.arg("-ss").arg(format!("{input_seek:.3}"));
         }
 
         cmd.arg("-i").arg(input_path);
@@ -579,14 +569,14 @@ impl HlsEngine {
         // Output seeking (accurate, slower) - AFTER -i
         // This decodes from the input seek point and discards until exact target
         if output_seek > 0.0 {
-            cmd.arg("-ss").arg(format!("{:.3}", output_seek));
+            cmd.arg("-ss").arg(format!("{output_seek:.3}"));
         }
 
         // Output timestamp offset - sets segment timestamps correctly
-        cmd.arg("-output_ts_offset").arg(format!("{:.3}", start));
+        cmd.arg("-output_ts_offset").arg(format!("{start:.3}"));
 
         // Duration limit (CRITICAL: prevent transcoding entire file)
-        cmd.arg("-t").arg(format!("{:.3}", duration));
+        cmd.arg("-t").arg(format!("{duration:.3}"));
 
         let threads = video_thread_count(config);
         cmd.args(["-threads", &threads]);
@@ -604,8 +594,7 @@ impl HlsEngine {
         let is_hw_encoder = config
             .hwaccel
             .as_ref()
-            .map(|hw| hw.is_hardware())
-            .unwrap_or(false);
+            .is_some_and(super::hwaccel::HwAccelConfig::is_hardware);
 
         if let Some(ref hw) = config.hwaccel {
             // Encoder (hwaccel flags already added before -i)
@@ -617,7 +606,15 @@ impl HlsEngine {
             }
 
             // For software encoders, add video filter and profile settings
-            if !hw.is_hardware() {
+            if hw.is_hardware() {
+                // Hardware encoder: force a compatible 8-bit format for high bit depth inputs
+                if config.is_high_bit_depth {
+                    let pix_fmt = hw.pix_fmt.as_deref().unwrap_or("nv12");
+                    cmd.arg("-pix_fmt").arg(pix_fmt);
+                } else if let Some(ref pix_fmt) = hw.pix_fmt {
+                    cmd.arg("-pix_fmt").arg(pix_fmt);
+                }
+            } else {
                 let pix_fmt = hw.pix_fmt.as_deref().unwrap_or("yuv420p");
                 let filter = software_video_filter(pix_fmt);
                 cmd.arg("-vf").arg(&filter);
@@ -627,14 +624,6 @@ impl HlsEngine {
                     filter = %filter,
                     "Configured low-impact software HLS video transcode"
                 );
-            } else {
-                // Hardware encoder: force a compatible 8-bit format for high bit depth inputs
-                if config.is_high_bit_depth {
-                    let pix_fmt = hw.pix_fmt.as_deref().unwrap_or("nv12");
-                    cmd.arg("-pix_fmt").arg(pix_fmt);
-                } else if let Some(ref pix_fmt) = hw.pix_fmt {
-                    cmd.arg("-pix_fmt").arg(pix_fmt);
-                }
             }
         } else {
             // Default software encoding fallback
@@ -688,7 +677,7 @@ impl HlsEngine {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to spawn ffmpeg for video segment: {:?}", cmd))?;
+            .with_context(|| format!("Failed to spawn ffmpeg for video segment: {cmd:?}"))?;
 
         // Spawn a task to log stderr in background (for debugging)
         if let Some(stderr) = child.stderr.take() {
@@ -710,7 +699,7 @@ impl HlsEngine {
 
     /// Transcode audio-only segment for HLS V2
     /// Implements exact logic from ebml_933.js
-    pub async fn transcode_audio_segment(
+    pub fn transcode_audio_segment(
         input_path: &str,
         start: f64,
         duration: f64,
@@ -737,23 +726,23 @@ impl HlsEngine {
 
         // Input seeking (fast, coarse) - BEFORE -i
         if input_seek > 0.0 {
-            cmd.arg("-ss").arg(format!("{:.3}", input_seek));
+            cmd.arg("-ss").arg(format!("{input_seek:.3}"));
         }
 
         cmd.arg("-i").arg(input_path);
 
         // Output seeking (accurate) - AFTER -i
         if output_seek > 0.0 {
-            cmd.arg("-ss").arg(format!("{:.3}", output_seek));
+            cmd.arg("-ss").arg(format!("{output_seek:.3}"));
         }
 
         // Output timestamp offset - REQUIRED to match video timestamps
-        cmd.arg("-output_ts_offset").arg(format!("{:.3}", start));
+        cmd.arg("-output_ts_offset").arg(format!("{start:.3}"));
 
         cmd.args(["-threads", "1"]);
 
         // Duration limit (CRITICAL)
-        cmd.arg("-t").arg(format!("{:.3}", duration));
+        cmd.arg("-t").arg(format!("{duration:.3}"));
 
         // Metadata cleanup
         cmd.args(["-max_muxing_queue_size", "2048"]);
@@ -763,7 +752,7 @@ impl HlsEngine {
 
         // Output mapping: specific audio track by GLOBAL index
         // Use 0:{index} to be precise, instead of a:{index} which is relative to audio streams
-        cmd.arg("-map").arg(format!("0:{}", audio_stream_index));
+        cmd.arg("-map").arg(format!("0:{audio_stream_index}"));
         cmd.args(["-vn", "-sn"]);
 
         // Audio encoding HLS V2: resample to keep segment timestamps monotonic,
@@ -789,7 +778,7 @@ impl HlsEngine {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to spawn ffmpeg for audio segment: {:?}", cmd))?;
+            .with_context(|| format!("Failed to spawn ffmpeg for audio segment: {cmd:?}"))?;
 
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
@@ -809,12 +798,13 @@ impl HlsEngine {
     }
 }
 
-fn configure_low_impact_ffmpeg(_cmd: &mut Command) {
+fn configure_low_impact_ffmpeg(cmd: &mut Command) {
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     {
         const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        _cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW);
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW);
     }
 }
 
@@ -824,8 +814,7 @@ fn video_thread_count(config: &TranscodeConfig) -> String {
     }
 
     let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
+        .map_or(2, std::num::NonZero::get)
         .saturating_sub(2)
         .clamp(1, 4);
     threads.to_string()

@@ -47,6 +47,9 @@ pub enum RarError {
     #[error("End of archive reached")]
     EndOfArchive,
 
+    #[error("Out of memory")]
+    NoMemory,
+
     #[error("Archive handle is closed")]
     ArchiveClosed,
 
@@ -66,10 +69,14 @@ pub enum RarError {
 impl RarError {
     /// Convert UnRAR error code to RarError
     pub fn from_code(code: i32) -> Self {
-        use crate::ffi::*;
+        use crate::ffi::{
+            RAR_BAD_ARCHIVE, RAR_BAD_DATA, RAR_BAD_PASSWORD, RAR_ECREATE, RAR_END_ARCHIVE,
+            RAR_EOPEN, RAR_EREAD, RAR_EREFERENCE, RAR_EWRITE, RAR_MISSING_PASSWORD, RAR_NO_MEMORY,
+            RAR_SMALL_BUF, RAR_UNKNOWN_FORMAT,
+        };
         match code {
             RAR_END_ARCHIVE => RarError::EndOfArchive,
-            RAR_NO_MEMORY => RarError::Unknown(code),
+            RAR_NO_MEMORY => RarError::NoMemory,
             RAR_BAD_DATA => RarError::BadData,
             RAR_BAD_ARCHIVE => RarError::BadArchive,
             RAR_UNKNOWN_FORMAT => RarError::UnknownFormat,

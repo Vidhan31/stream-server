@@ -47,7 +47,7 @@ impl UpdateStatus {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateCandidate {
+pub(crate) struct UpdateCandidate {
     pub version: String,
     pub tag: String,
     pub release_url: String,
@@ -56,14 +56,14 @@ pub struct UpdateCandidate {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateInner {
+pub(crate) struct UpdateInner {
     pub status: UpdateStatus,
     pub candidate: Option<UpdateCandidate>,
     pub staged: Option<StagedUpdate>,
 }
 
 impl UpdateInner {
-    pub fn new(channel: UpdateChannel) -> Self {
+    pub(crate) fn new(channel: UpdateChannel) -> Self {
         Self {
             status: UpdateStatus::new(channel),
             candidate: None,

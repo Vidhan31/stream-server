@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-pub fn start(state: Arc<AppState>) -> JoinHandle<()> {
+pub(crate) fn start(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         debug!("Cache cleaner started");
 
@@ -29,7 +29,7 @@ pub fn start(state: Arc<AppState>) -> JoinHandle<()> {
                                 | notify::EventKind::Modify(_)
                                 | notify::EventKind::Remove(_)
                         ) {
-                            let _ = tx_clone.blocking_send(());
+                            let _ = tx_clone.try_send(());
                         }
                     }
                     Err(e) => error!("Watch error: {:?}", e),
@@ -103,6 +103,7 @@ pub fn start(state: Arc<AppState>) -> JoinHandle<()> {
 }
 
 async fn clean_cache(state: &Arc<AppState>) -> anyhow::Result<()> {
+    state.prune_expired_archive_sessions();
     let settings = state.settings.read().await;
     let limit = settings.cache_size as u64;
     drop(settings); // Release lock
@@ -147,7 +148,7 @@ async fn clean_cache(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     // 2. Scan and Evict immediately based on age (30 days)
-    let thirty_days = Duration::from_secs(30 * 24 * 60 * 60);
+    let thirty_days = Duration::from_hours(720);
     let now = std::time::SystemTime::now();
 
     let mut files = Vec::new();

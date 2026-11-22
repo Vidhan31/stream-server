@@ -3,18 +3,18 @@ use async_trait::async_trait;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncSeek};
 
-pub mod bridge;
-pub mod cache;
-pub mod rar;
-pub mod sevenz;
-pub mod tar;
-pub mod tgz;
-pub mod zip;
+pub(crate) mod bridge;
+pub(crate) mod cache;
+pub(crate) mod rar;
+pub(crate) mod sevenz;
+pub(crate) mod tar;
+pub(crate) mod tgz;
+pub(crate) mod zip;
 
 /// Represents a file inside an archive
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct ArchiveEntry {
+pub(crate) struct ArchiveEntry {
     pub path: String, // Internal path in archive
     pub size: u64,
     pub is_dir: bool,
@@ -26,11 +26,13 @@ pub struct ArchiveSession {
     pub path: std::path::PathBuf,
     pub selected_file: Option<String>,
     pub created: std::time::Instant,
+    pub last_accessed: std::time::Instant,
+    pub is_temp: bool,
 }
 
 /// Configuration for archive caching behavior
 #[derive(Debug, Clone)]
-pub struct CacheConfig {
+pub(crate) struct CacheConfig {
     /// Directory where cache files should be written
     pub cache_dir: Option<std::path::PathBuf>,
     /// Maximum cache size in bytes (0 = disabled)
@@ -39,7 +41,7 @@ pub struct CacheConfig {
 
 impl CacheConfig {
     /// Get the cache directory, falling back to system temp if not configured
-    pub fn get_dir_or_temp(&self) -> std::path::PathBuf {
+    pub(crate) fn get_dir_or_temp(&self) -> std::path::PathBuf {
         self.cache_dir.clone().unwrap_or_else(std::env::temp_dir)
     }
 }
@@ -54,7 +56,7 @@ impl Default for CacheConfig {
 }
 
 /// Helper to identify if a path is a supported archive
-pub fn is_archive(path: &Path) -> bool {
+pub(crate) fn is_archive(path: &Path) -> bool {
     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
         let ext = ext.to_lowercase();
         // Check compound extension for .tar.gz
@@ -72,7 +74,7 @@ pub fn is_archive(path: &Path) -> bool {
 /// Helper to identify if a path is a split archive part (e.g. .part01.rar)
 /// Returns (base_name, part_number) if it is.
 #[allow(dead_code)]
-pub fn is_split_archive_part(path: &Path) -> Option<(String, u32)> {
+pub(crate) fn is_split_archive_part(path: &Path) -> Option<(String, u32)> {
     if let Some(_file_name) = path.file_stem().and_then(|s| s.to_str()) {
         // Regex-like check for .partXXX or .rXX
         // Simple heuristic: ends with .part\d+
@@ -82,12 +84,12 @@ pub fn is_split_archive_part(path: &Path) -> Option<(String, u32)> {
 }
 
 /// Trait combining AsyncRead, AsyncSeek, Send, Sync, and Unpin for trait objects
-pub trait AsyncSeekableReader: AsyncRead + AsyncSeek + Unpin + Send {}
+pub(crate) trait AsyncSeekableReader: AsyncRead + AsyncSeek + Unpin + Send {}
 impl<T: AsyncRead + AsyncSeek + Unpin + Send> AsyncSeekableReader for T {}
 
 /// Trait for Archive implementations
 #[async_trait]
-pub trait ArchiveReader: Send + Sync {
+pub(crate) trait ArchiveReader: Send + Sync {
     /// List all files in the archive
     async fn list_files(&self) -> Result<Vec<ArchiveEntry>>;
 
@@ -95,12 +97,12 @@ pub trait ArchiveReader: Send + Sync {
     async fn open_file(&self, path: &str) -> Result<Box<dyn AsyncSeekableReader>>;
 }
 
-pub async fn get_archive_reader(path: &Path) -> Result<Box<dyn ArchiveReader>> {
+pub(crate) async fn get_archive_reader(path: &Path) -> Result<Box<dyn ArchiveReader>> {
     get_archive_reader_with_config(path, CacheConfig::default()).await
 }
 
 /// Create an archive reader with custom cache configuration
-pub async fn get_archive_reader_with_config(
+pub(crate) async fn get_archive_reader_with_config(
     path: &Path,
     cache_config: CacheConfig,
 ) -> Result<Box<dyn ArchiveReader>> {
@@ -150,7 +152,7 @@ pub async fn get_archive_reader_with_config(
     }
 }
 
-pub fn get_archive_reader_from_stream(
+pub(crate) fn get_archive_reader_from_stream(
     reader: Box<dyn AsyncSeekableReader>,
     extension: &str,
 ) -> Result<Box<dyn ArchiveReader>> {

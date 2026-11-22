@@ -2,6 +2,12 @@
 //!
 //! This crate provides safe, async Rust bindings for extracting RAR archives
 //! using the UnRAR C++ library.
+
+#![allow(
+    unreachable_pub,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unwrap_used
+)]
 //!
 //! # Example
 //!

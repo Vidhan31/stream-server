@@ -31,7 +31,7 @@ impl LocalIndex {
     }
 
     pub fn insert(&self, mut item: IndexItem) {
-        let mut items = self.items.write().unwrap();
+        let mut items = self.items.write().expect("local index items lock poisoned");
         let key = if !item.id.is_empty() {
             item.id.clone()
         } else if let Some(ref imdb) = item.imdb_id {
@@ -43,12 +43,15 @@ impl LocalIndex {
             format!("local:{}", hasher.finish())
         };
 
-        item.id = key.clone();
+        item.id.clone_from(&key);
 
         items.entry(key.clone()).or_default().push(item.clone());
 
-        let mut paths = self.path_map.write().unwrap();
-        paths.insert(item.path.clone(), key);
+        let mut paths = self
+            .path_map
+            .write()
+            .expect("local index path_map lock poisoned");
+        paths.insert(item.path, key);
     }
 }
 

@@ -43,7 +43,7 @@ impl HwAccelConfig {
     /// - `sw` / `software` / `cpu` - Software encoding
     /// - `auto` / None - Auto-select best available
     pub fn from_transcode_profile(available: &[String], transcode_profile: Option<&str>) -> Self {
-        let profile = transcode_profile.map(|s| s.to_lowercase());
+        let profile = transcode_profile.map(str::to_lowercase);
 
         match profile.as_deref() {
             // Hardware profiles
@@ -110,11 +110,11 @@ impl HwAccelConfig {
                 }
             }
             // Software encoding
-            Some("sw") | Some("software") | Some("cpu") => Self::software(),
+            Some("sw" | "software" | "cpu") => Self::software(),
             // Auto-select
             Some("auto") | None => Self::auto_select(available),
             // Accept bare hardware encoder names (nvenc, qsv, vaapi, etc.)
-            Some("nvenc") | Some("nvidia") | Some("cuda") => {
+            Some("nvenc" | "nvidia" | "cuda") => {
                 if encoder_listed(available, "nvenc") {
                     Self::nvenc()
                 } else {
@@ -122,7 +122,7 @@ impl HwAccelConfig {
                     Self::software()
                 }
             }
-            Some("qsv") | Some("intel") | Some("quicksync") => {
+            Some("qsv" | "intel" | "quicksync") => {
                 if encoder_listed(available, "qsv") {
                     Self::qsv()
                 } else {
@@ -138,7 +138,7 @@ impl HwAccelConfig {
                     Self::software()
                 }
             }
-            Some("videotoolbox") | Some("vt") => {
+            Some("videotoolbox" | "vt") => {
                 if encoder_listed(available, "videotoolbox") {
                     Self::videotoolbox()
                 } else {
@@ -148,7 +148,7 @@ impl HwAccelConfig {
                     Self::software()
                 }
             }
-            Some("v4l2") | Some("v4l2m2m") => {
+            Some("v4l2" | "v4l2m2m") => {
                 if encoder_listed(available, "v4l2m2m") {
                     Self::v4l2m2m()
                 } else {

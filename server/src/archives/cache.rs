@@ -16,7 +16,7 @@ struct StateSnapshot {
 
 /// The core cache controller
 #[derive(Clone)]
-pub struct ProgressiveCache {
+pub(crate) struct ProgressiveCache {
     state_rx: watch::Receiver<StateSnapshot>,
     temp_path: PathBuf,
     // Keep the temp file struct alive
@@ -27,7 +27,7 @@ pub struct ProgressiveCache {
 
 impl ProgressiveCache {
     /// Create a new ProgressiveCache using system temp directory
-    pub async fn new(total_size: Option<u64>) -> io::Result<(Self, CacheWriter)> {
+    pub(crate) async fn new(total_size: Option<u64>) -> io::Result<(Self, CacheWriter)> {
         // We use std NamedTempFile to create the path and handle, but open with tokio
         let temp_file = NamedTempFile::new()?;
         Self::from_temp_file(temp_file, total_size).await
@@ -35,7 +35,7 @@ impl ProgressiveCache {
 
     /// Create a new ProgressiveCache in a specific directory
     /// This allows respecting the user's cache_root setting
-    pub async fn new_in_dir(
+    pub(crate) async fn new_in_dir(
         dir: &std::path::Path,
         total_size: Option<u64>,
     ) -> io::Result<(Self, CacheWriter)> {
@@ -92,7 +92,7 @@ impl ProgressiveCache {
         ))
     }
 
-    pub async fn reader(&self) -> io::Result<ProgressiveReader> {
+    pub(crate) async fn reader(&self) -> io::Result<ProgressiveReader> {
         let file = File::open(&self.temp_path).await?;
         Ok(ProgressiveReader {
             state_rx: self.state_rx.clone(),
@@ -104,7 +104,7 @@ impl ProgressiveCache {
     }
 }
 
-pub struct CacheWriter {
+pub(crate) struct CacheWriter {
     state_tx: watch::Sender<StateSnapshot>,
     file: File,
     _video_file_size: Option<u64>,
@@ -140,14 +140,14 @@ impl AsyncWrite for CacheWriter {
 }
 
 impl CacheWriter {
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.state_tx.send_modify(|state| {
             state.is_complete = true;
         });
         self.notify.notify_waiters();
     }
 
-    pub fn set_error(&self, err: String) {
+    pub(crate) fn set_error(&self, err: String) {
         self.state_tx.send_modify(|state| {
             state.error = Some(err);
             state.is_complete = true;
@@ -157,7 +157,7 @@ impl CacheWriter {
 
     /// Create a synchronous writer that shares the same state.
     /// Useful for legacy/sync libraries like 7z or unrar.
-    pub fn try_clone_sync(&self) -> io::Result<SyncCacheWriter> {
+    pub(crate) fn try_clone_sync(&self) -> io::Result<SyncCacheWriter> {
         let file = std::fs::OpenOptions::new().write(true).open(&self.path)?;
 
         Ok(SyncCacheWriter {
@@ -169,21 +169,21 @@ impl CacheWriter {
 }
 
 /// A synchronous writer that updates the Async Cache state
-pub struct SyncCacheWriter {
+pub(crate) struct SyncCacheWriter {
     state_tx: watch::Sender<StateSnapshot>,
     file: std::fs::File,
     notify: Arc<Notify>,
 }
 
 impl SyncCacheWriter {
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.state_tx.send_modify(|state| {
             state.is_complete = true;
         });
         self.notify.notify_waiters();
     }
 
-    pub fn set_error(&self, err: String) {
+    pub(crate) fn set_error(&self, err: String) {
         self.state_tx.send_modify(|state| {
             state.error = Some(err);
             state.is_complete = true;
@@ -209,7 +209,7 @@ impl std::io::Write for SyncCacheWriter {
     }
 }
 
-pub struct ProgressiveReader {
+pub(crate) struct ProgressiveReader {
     state_rx: watch::Receiver<StateSnapshot>,
     file: File,
     pos: u64,
@@ -285,7 +285,7 @@ impl AsyncRead for ProgressiveReader {
             tokio::pin!(notified);
 
             match notified.poll(cx) {
-                Poll::Ready(()) => continue, // Woke up, retry
+                Poll::Ready(()) => {} // Woke up, retry
                 Poll::Pending => return Poll::Pending,
             }
         }

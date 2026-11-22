@@ -15,7 +15,7 @@ static LOG_GUARDS: OnceLock<Vec<WorkerGuard>> = OnceLock::new();
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 static ACTIVE_DIRECT_STREAMS: AtomicU64 = AtomicU64::new(0);
 
-pub struct LogWriters {
+pub(crate) struct LogWriters {
     pub human_writer: NonBlocking,
     pub archive_writer: NonBlocking,
     pub json_writer: NonBlocking,
@@ -25,11 +25,11 @@ pub struct LogWriters {
     pub guards: Vec<WorkerGuard>,
 }
 
-pub fn init_process_start() {
+pub(crate) fn init_process_start() {
     let _ = PROCESS_START.set(Instant::now());
 }
 
-pub fn uptime_secs() -> u64 {
+pub(crate) fn uptime_secs() -> u64 {
     PROCESS_START.get_or_init(Instant::now).elapsed().as_secs()
 }
 
@@ -45,6 +45,7 @@ fn format_headers(headers: &axum::http::HeaderMap) -> String {
         )
     }
 
+    use std::fmt::Write as _;
     let mut out = String::new();
     for (name, value) in headers {
         if !out.is_empty() {
@@ -53,11 +54,13 @@ fn format_headers(headers: &axum::http::HeaderMap) -> String {
         out.push_str(name.as_str());
         out.push('=');
         if is_sensitive(name) {
-            out.push_str(&format!("<redacted:{} bytes>", value.len()));
+            let _ = write!(out, "<redacted:{} bytes>", value.len());
         } else {
             match value.to_str() {
                 Ok(v) => out.push_str(v),
-                Err(_) => out.push_str(&format!("<binary:{} bytes>", value.len())),
+                Err(_) => {
+                    let _ = write!(out, "<binary:{} bytes>", value.len());
+                }
             }
         }
     }
@@ -70,7 +73,7 @@ fn format_headers(headers: &axum::http::HeaderMap) -> String {
 /// full URI, HTTP version, the common diagnostic headers broken out as their
 /// own fields, and a dump of every header. Centralised so that every
 /// "we did not serve this" code path logs identically and greppably.
-pub fn log_unhandled(
+pub(crate) fn log_unhandled(
     reason: &str,
     status: u16,
     peer: Option<std::net::SocketAddr>,
@@ -87,9 +90,7 @@ pub fn log_unhandled(
             .unwrap_or("")
             .to_string()
     };
-    let peer = peer
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let peer = peer.map_or_else(|| "unknown".to_string(), |p| p.to_string());
 
     tracing::error!(
         reason,
@@ -113,15 +114,15 @@ pub fn log_unhandled(
     );
 }
 
-pub fn active_direct_streams() -> u64 {
+pub(crate) fn active_direct_streams() -> u64 {
     ACTIVE_DIRECT_STREAMS.load(Ordering::Relaxed)
 }
 
-pub fn direct_stream_started() {
+pub(crate) fn direct_stream_started() {
     ACTIVE_DIRECT_STREAMS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn direct_stream_ended() {
+pub(crate) fn direct_stream_ended() {
     ACTIVE_DIRECT_STREAMS
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             Some(count.saturating_sub(1))
@@ -129,7 +130,7 @@ pub fn direct_stream_ended() {
         .ok();
 }
 
-pub fn open_log_writers(log_dir: &Path) -> std::io::Result<LogWriters> {
+pub(crate) fn open_log_writers(log_dir: &Path) -> std::io::Result<LogWriters> {
     std::fs::create_dir_all(log_dir)?;
 
     let human_path = log_dir.join("server_current.log");
@@ -170,11 +171,11 @@ pub fn open_log_writers(log_dir: &Path) -> std::io::Result<LogWriters> {
     })
 }
 
-pub fn store_log_guards(guards: Vec<WorkerGuard>) {
+pub(crate) fn store_log_guards(guards: Vec<WorkerGuard>) {
     let _ = LOG_GUARDS.set(guards);
 }
 
-pub fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
     if PANIC_HOOK_INSTALLED.set(()).is_err() {
         return;
@@ -184,10 +185,10 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         let current_thread = std::thread::current();
         let thread_name = current_thread.name().unwrap_or("unnamed");
-        let location = panic_info
-            .location()
-            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-            .unwrap_or_else(|| "unknown".to_string());
+        let location = panic_info.location().map_or_else(
+            || "unknown".to_string(),
+            |loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()),
+        );
         let message = panic_message(panic_info);
         let memory = crate::diagnostics::process_memory_snapshot();
         let backtrace = Backtrace::force_capture();
@@ -220,7 +221,7 @@ fn panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
     }
 }
 
-pub fn spawn_logged<F>(name: &'static str, fut: F) -> JoinHandle<()>
+pub(crate) fn spawn_logged<F>(name: &'static str, fut: F) -> JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -229,14 +230,14 @@ where
         match joined {
             Ok(()) => tracing::warn!(task = name, "long-running task returned"),
             Err(err) if err.is_panic() => {
-                tracing::error!(task = name, error = %err, "long-running task panicked")
+                tracing::error!(task = name, error = %err, "long-running task panicked");
             }
             Err(err) => tracing::warn!(task = name, error = %err, "long-running task cancelled"),
         }
     })
 }
 
-pub fn log_startup_context(
+pub(crate) fn log_startup_context(
     config_dir: &Path,
     cache_dir: &Path,
     log_dir: &Path,
@@ -245,8 +246,7 @@ pub fn log_startup_context(
     json_log: &Path,
 ) {
     let exe_path = std::env::current_exe()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+        .map_or_else(|_| "unknown".to_string(), |path| path.display().to_string());
     let args = std::env::args().collect::<Vec<_>>();
 
     tracing::info!(
@@ -265,7 +265,7 @@ pub fn log_startup_context(
     );
 }
 
-pub fn install_native_crash_handler(log_dir: &Path) {
+pub(crate) fn install_native_crash_handler(log_dir: &Path) {
     let crash_dir = log_dir.join("crashes");
     if let Err(err) = std::fs::create_dir_all(&crash_dir) {
         tracing::warn!(error = %err, path = %crash_dir.display(), "failed to create crash dump directory");
@@ -365,5 +365,5 @@ unsafe extern "system" fn windows_exception_filter(
     EXCEPTION_EXECUTE_HANDLER
 }
 
-pub const MEMORY_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
-pub const MEMORY_GROWTH_ALERT_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MEMORY_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const MEMORY_GROWTH_ALERT_BYTES: u64 = 128 * 1024 * 1024;

@@ -6,3 +6,6 @@ edition = "2024"
 [[bin]]
 name = "stremio-runtime"
 path = "src/main.rs"
+
+[lints]
+workspace = true

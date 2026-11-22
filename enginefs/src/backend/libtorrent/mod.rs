@@ -621,7 +621,7 @@ impl TorrentBackend for LibtorrentBackend {
                                 "Instant Loading: Found cached metadata for {}. Skipping magnet resolution.",
                                 info_hash
                             );
-                            let mut p = params.clone();
+                            let mut p = params;
                             p.torrent_data = cached_data;
                             p.save_path = save_path;
                             p.paused = true;
@@ -750,7 +750,7 @@ impl TorrentBackend for LibtorrentBackend {
         }
         self.playback.remove_torrent(info_hash).await;
 
-        self.piece_cache.clear_torrent(info_hash).await;
+        self.piece_cache.clear_torrent(info_hash);
         self.piece_waiter.clear_torrent(info_hash);
         libtorrent_sys::memory_clear_torrent(info_hash);
         Ok(())
@@ -805,7 +805,7 @@ impl TorrentBackend for LibtorrentBackend {
         }
     }
 
-    fn set_seeding_enabled(&self, enabled: bool) {
-        self.playback.set_seeding_enabled(enabled);
+    fn set_seeding_enabled(&self, policy: crate::backend::SeedingPolicy) {
+        self.playback.set_seeding_enabled(policy.is_enabled());
     }
 }

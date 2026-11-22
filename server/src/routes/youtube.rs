@@ -14,15 +14,15 @@ use axum::{
     response::{IntoResponse, Redirect},
     routing::get,
 };
-use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
 /// Signed googlevideo URLs outlive this comfortably, so a cache hit is always
 /// still playable; the bound exists to keep hovering over a poster from
 /// spawning an extractor process per frame.
-const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const CACHE_TTL: Duration = Duration::from_mins(30);
 
 /// Prefer a single file that already carries audio and video. `b` falls back to
 /// the best progressive format when the mp4 variant is missing; formats that
@@ -31,14 +31,14 @@ const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const FORMAT_SELECTOR: &str =
     "b[ext=mp4][vcodec!=none][acodec!=none]/b[vcodec!=none][acodec!=none]";
 
-static CACHE: Lazy<dashmap::DashMap<String, (Instant, ResolvedStream)>> =
-    Lazy::new(dashmap::DashMap::new);
+static CACHE: LazyLock<dashmap::DashMap<String, (Instant, ResolvedStream)>> =
+    LazyLock::new(dashmap::DashMap::new);
 
-pub fn router() -> Router<AppState> {
+pub(crate) fn router() -> Router<AppState> {
     Router::new().route("/{id}", get(youtube_handler))
 }
 
-pub async fn youtube_handler(
+pub(crate) async fn youtube_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -57,7 +57,7 @@ pub async fn youtube_handler(
     };
 
     if as_json {
-        Json(stream.to_json()).into_response()
+        Json(stream.as_response()).into_response()
     } else {
         Redirect::temporary(&stream.url).into_response()
     }
@@ -212,23 +212,40 @@ impl ResolvedStream {
         })
     }
 
-    /// Mirrors the response shape the previous implementation returned, so
-    /// existing `/yt/<id>.json` callers keep working.
-    fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "url": self.url,
-            "itag": self.itag,
-            "quality": self.quality,
-            "container": self.container,
-            "hasVideo": self.has_video,
-            "hasAudio": self.has_audio,
-            "isLive": self.is_live,
-            "isHLS": self.is_hls,
-            "isDashMPD": self.is_dash,
-            "approxDurationMs": self.duration_ms.map(|ms| ms.to_string()),
-            "mimeType": self.mime_type,
-        })
+    fn as_response(&self) -> ResolvedStreamResponse<'_> {
+        ResolvedStreamResponse {
+            url: &self.url,
+            itag: self.itag,
+            quality: &self.quality,
+            container: &self.container,
+            has_video: self.has_video,
+            has_audio: self.has_audio,
+            is_live: self.is_live,
+            is_hls: self.is_hls,
+            is_dash_mpd: self.is_dash,
+            approx_duration_ms: self.duration_ms.map(|ms| ms.to_string()),
+            mime_type: &self.mime_type,
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResolvedStreamResponse<'a> {
+    pub url: &'a str,
+    pub itag: Option<u64>,
+    pub quality: &'a str,
+    pub container: &'a str,
+    pub has_video: bool,
+    pub has_audio: bool,
+    pub is_live: bool,
+    #[serde(rename = "isHLS")]
+    pub is_hls: bool,
+    #[serde(rename = "isDashMPD")]
+    pub is_dash_mpd: bool,
+    #[serde(rename = "approxDurationMs", skip_serializing_if = "Option::is_none")]
+    pub approx_duration_ms: Option<String>,
+    pub mime_type: &'a str,
 }
 
 /// yt-dlp reports a missing track as the literal string `none`.
@@ -246,7 +263,7 @@ fn mime_type(container: &str, vcodec: Option<&str>, acodec: Option<&str>) -> Str
     let codecs = [vcodec, acodec]
         .into_iter()
         .filter(|codec| is_present(*codec))
-        .map(|codec| codec.unwrap_or_default())
+        .map(std::option::Option::unwrap_or_default)
         .collect::<Vec<_>>()
         .join(", ");
 

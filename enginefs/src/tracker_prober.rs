@@ -38,9 +38,8 @@ impl TrackerProber {
     }
 
     async fn probe(url_str: &str) -> Option<Duration> {
-        let url = match Url::parse(url_str) {
-            Ok(u) => u,
-            Err(_) => return None,
+        let Ok(url) = Url::parse(url_str) else {
+            return None;
         };
 
         match url.scheme() {
@@ -76,7 +75,7 @@ impl TrackerProber {
     async fn probe_udp(url: &Url) -> Option<Duration> {
         let host = url.host_str()?;
         let port = url.port().unwrap_or(80);
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{host}:{port}");
 
         // Resolve address first
         let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
@@ -90,7 +89,7 @@ impl TrackerProber {
         // 8       32      action          0 // connect
         // 12      32      transaction_id
 
-        let protocol_id: u64 = 0x41727101980;
+        let protocol_id: u64 = 0x0417_2710_1980;
         let action: u32 = 0;
         let transaction_id: u32 = 12345; // simplified
 
@@ -110,8 +109,10 @@ impl TrackerProber {
         match timeout.await {
             Ok(Ok(n)) if n >= 8 => {
                 // Check action (0) and transaction_id (12345)
-                let recv_action = u32::from_be_bytes(recv_buf[0..4].try_into().unwrap());
-                let recv_trans_id = u32::from_be_bytes(recv_buf[4..8].try_into().unwrap());
+                let recv_action =
+                    u32::from_be_bytes([recv_buf[0], recv_buf[1], recv_buf[2], recv_buf[3]]);
+                let recv_trans_id =
+                    u32::from_be_bytes([recv_buf[4], recv_buf[5], recv_buf[6], recv_buf[7]]);
 
                 if recv_action == 0 && recv_trans_id == transaction_id {
                     Some(start.elapsed())

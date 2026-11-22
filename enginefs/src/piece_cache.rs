@@ -55,7 +55,7 @@ pub struct PieceCacheManager {
     /// Track which pieces have been written to disk
     disk_written: Arc<RwLock<HashSet<(String, i32)>>>,
     /// Track in-flight read_piece requests to avoid duplicates
-    pending_requests: Arc<RwLock<HashSet<(String, i32)>>>,
+    pending_requests: RwLock<HashSet<(String, i32)>>,
 }
 
 impl PieceCacheManager {
@@ -95,22 +95,17 @@ impl PieceCacheManager {
             cache,
             config,
             disk_written: Arc::new(RwLock::new(HashSet::new())),
-            pending_requests: Arc::new(RwLock::new(HashSet::new())),
+            pending_requests: RwLock::new(HashSet::new()),
         }
     }
 
-    /// Store a piece in memory cache
-    pub async fn put_piece(&self, info_hash: &str, piece_idx: i32, data: Vec<u8>) {
-        self.put_piece_now(info_hash, piece_idx, data);
-    }
-
-    /// Store a verified piece without requiring an async executor hop.
-    pub fn put_piece_now(&self, info_hash: &str, piece_idx: i32, data: Vec<u8>) {
+    /// Store a piece in memory cache and optionally persist to disk in background.
+    pub fn put_piece(&self, info_hash: &str, piece_idx: i32, data: Vec<u8>) {
         let key = (info_hash.to_lowercase(), piece_idx);
         let data_len = data.len();
         let data = Arc::new(data);
 
-        self.cache.insert(key.clone(), data.clone());
+        self.cache.insert(key.clone(), Arc::clone(&data));
 
         // Clear from pending requests since it's now cached
         self.pending_requests.write().remove(&key);
@@ -130,11 +125,11 @@ impl PieceCacheManager {
         {
             let piece_path = disk_path
                 .join(&key.0)
-                .join(format!("piece_{:06}.bin", piece_idx));
+                .join(format!("piece_{piece_idx:06}.bin"));
 
-            let disk_written = self.disk_written.clone();
-            let data_clone = data.clone();
-            let key_clone = key.clone();
+            let disk_written = Arc::clone(&self.disk_written);
+            let data_clone = data;
+            let key_clone = key;
 
             tokio::spawn(async move {
                 if let Some(parent) = piece_path.parent()
@@ -145,7 +140,7 @@ impl PieceCacheManager {
                 }
 
                 match tokio::fs::write(&piece_path, &*data_clone).await {
-                    Ok(_) => {
+                    Ok(()) => {
                         let mut written = disk_written.write();
                         written.insert(key_clone);
                         debug!("PieceCache: Background disk write: {:?}", piece_path);
@@ -156,6 +151,11 @@ impl PieceCacheManager {
                 }
             });
         }
+    }
+
+    /// Store a verified piece without requiring an async executor hop (alias for `put_piece`).
+    pub fn put_piece_now(&self, info_hash: &str, piece_idx: i32, data: Vec<u8>) {
+        self.put_piece(info_hash, piece_idx, data);
     }
 
     /// Get a piece from cache (memory first, then disk)
@@ -173,12 +173,12 @@ impl PieceCacheManager {
         {
             let piece_path = disk_path
                 .join(&key.0)
-                .join(format!("piece_{:06}.bin", piece_idx));
+                .join(format!("piece_{piece_idx:06}.bin"));
 
             if let Ok(data) = tokio::fs::read(&piece_path).await {
                 let data = Arc::new(data);
                 // Re-populate memory cache
-                self.cache.insert(key, data.clone());
+                self.cache.insert(key, Arc::clone(&data));
                 debug!(
                     "PieceCache: Loaded piece {} from disk for {}",
                     piece_idx, info_hash
@@ -196,7 +196,7 @@ impl PieceCacheManager {
     }
 
     /// Check if piece is available (in memory or disk)
-    pub async fn has_piece(&self, info_hash: &str, piece_idx: i32) -> bool {
+    pub fn has_piece(&self, info_hash: &str, piece_idx: i32) -> bool {
         let key = (info_hash.to_lowercase(), piece_idx);
 
         if self.cache.contains_key(&key) {
@@ -210,14 +210,14 @@ impl PieceCacheManager {
 
     /// Mark a piece as pending (returns false if already pending)
     /// Used for request coalescing - prevents duplicate read_piece() calls
-    pub async fn mark_pending(&self, info_hash: &str, piece_idx: i32) -> bool {
+    pub fn mark_pending(&self, info_hash: &str, piece_idx: i32) -> bool {
         let key = (info_hash.to_lowercase(), piece_idx);
         let mut pending = self.pending_requests.write();
         pending.insert(key)
     }
 
     /// Check if a piece request is already pending
-    pub async fn is_pending(&self, info_hash: &str, piece_idx: i32) -> bool {
+    pub fn is_pending(&self, info_hash: &str, piece_idx: i32) -> bool {
         let key = (info_hash.to_lowercase(), piece_idx);
         let pending = self.pending_requests.read();
         pending.contains(&key)
@@ -229,7 +229,7 @@ impl PieceCacheManager {
     }
 
     /// Clear all cached pieces for a specific torrent
-    pub async fn clear_torrent(&self, info_hash: &str) {
+    pub fn clear_torrent(&self, info_hash: &str) {
         let info_hash_lower = info_hash.to_lowercase();
 
         if let Err(error) = self.cache.invalidate_entries_if({
@@ -271,7 +271,7 @@ mod tests {
         cache.put_piece_now("torrent-a", 0, vec![1, 2, 3]);
         cache.put_piece_now("torrent-b", 0, vec![4, 5, 6]);
 
-        cache.clear_torrent("torrent-a").await;
+        cache.clear_torrent("torrent-a");
 
         assert!(cache.get_cached_piece("torrent-a", 0).is_none());
         assert_eq!(

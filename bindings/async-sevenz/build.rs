@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::undocumented_unsafe_blocks,
+    clippy::uninlined_format_args,
+    clippy::format_push_string
+)]
+
 use std::env;
 use std::path::PathBuf;
 
@@ -65,8 +72,7 @@ fn find_include_paths() -> Vec<PathBuf> {
             // Check both Program Files directories
             for root in &[&program_files, &program_files_x86] {
                 let p = PathBuf::from(format!(
-                    r"{}\Microsoft Visual Studio\{}\{}\VC\Tools\MSVC",
-                    root, year, edition
+                    r"{root}\Microsoft Visual Studio\{year}\{edition}\VC\Tools\MSVC"
                 ));
                 if p.exists() {
                     // Find latest version
@@ -101,8 +107,8 @@ fn find_include_paths() -> Vec<PathBuf> {
 
     // 2. Find Windows SDK Includes
     let sdk_roots = vec![
-        PathBuf::from(format!(r"{}\Windows Kits\10\Include", program_files_x86)),
-        PathBuf::from(format!(r"{}\Windows Kits\10\Include", program_files)),
+        PathBuf::from(format!(r"{program_files_x86}\Windows Kits\10\Include")),
+        PathBuf::from(format!(r"{program_files}\Windows Kits\10\Include")),
     ];
 
     for sdk_root in sdk_roots {
@@ -148,11 +154,11 @@ fn main() {
             let mut args = String::new();
             for inc in includes_sys {
                 let p = inc.to_string_lossy();
-                extra_includes.push(format!("-I{}", p));
-                args.push_str(&format!("-I\"{}\" ", p));
+                extra_includes.push(format!("-I{p}"));
+                args.push_str(&format!("-I\"{p}\" "));
             }
             if !args.is_empty() {
-                println!("cargo:rustc-env=BINDGEN_EXTRA_CLANG_ARGS={}", args);
+                println!("cargo:rustc-env=BINDGEN_EXTRA_CLANG_ARGS={args}");
                 // Also set env var for current process (autocxx build)
                 unsafe {
                     env::set_var("BINDGEN_EXTRA_CLANG_ARGS", args);
@@ -163,9 +169,11 @@ fn main() {
 
     let root = PathBuf::from("vendor/7zip/CPP");
 
-    if !root.exists() {
-        panic!("7-Zip source not found at {:?}. Please provide it.", root);
-    }
+    assert!(
+        root.exists(),
+        "7-Zip source not found at {}. Please provide it.",
+        root.display()
+    );
 
     // Include paths
     let includes = vec![
@@ -278,7 +286,7 @@ fn main() {
 
     if target_os == "android" {
         if let Ok(target) = env::var("TARGET") {
-            clang_args.push(format!("--target={}", target));
+            clang_args.push(format!("--target={target}"));
         }
         if let Ok(ndk) = env::var("ANDROID_NDK_HOME").or_else(|_| env::var("ANDROID_NDK_ROOT")) {
             let host_tag = if cfg!(target_os = "windows") {
@@ -288,8 +296,8 @@ fn main() {
             } else {
                 "linux-x86_64"
             };
-            let sysroot = format!("{}/toolchains/llvm/prebuilt/{}/sysroot", ndk, host_tag);
-            clang_args.push(format!("--sysroot={}", sysroot));
+            let sysroot = format!("{ndk}/toolchains/llvm/prebuilt/{host_tag}/sysroot");
+            clang_args.push(format!("--sysroot={sysroot}"));
 
             // Find clang's builtin header dir in NDK
             let clang_dir = PathBuf::from(&ndk)
@@ -311,7 +319,7 @@ fn main() {
         }
     }
 
-    let clang_args_refs: Vec<&str> = clang_args.iter().map(|s| s.as_str()).collect();
+    let clang_args_refs: Vec<&str> = clang_args.iter().map(std::string::String::as_str).collect();
 
     let mut b = autocxx_build::Builder::new("src/ffi.rs", &includes)
         .extra_clang_args(&clang_args_refs)

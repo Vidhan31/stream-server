@@ -36,7 +36,7 @@ impl fmt::Display for MissingFfmpegError {
 impl Error for MissingFfmpegError {}
 
 /// Orchestrate the setup: check, download, verify, extract, configure path.
-pub async fn setup_ffmpeg() -> Result<()> {
+pub(crate) async fn setup_ffmpeg() -> Result<()> {
     if ffmpeg_tools_available() {
         info!("FFmpeg and FFprobe are already available in PATH.");
         return Ok(());
@@ -181,7 +181,7 @@ fn ensure_writable_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn ffmpeg_tools_available() -> bool {
+pub(crate) fn ffmpeg_tools_available() -> bool {
     command_available("ffmpeg") && command_available("ffprobe")
 }
 
@@ -189,8 +189,7 @@ fn command_available(command: &str) -> bool {
     Command::new(command)
         .arg("-version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn ffmpeg_tools_exist(bin_dir: &Path) -> bool {
@@ -259,7 +258,9 @@ fn extract_ffmpeg(zip_path: &Path, target_dir: &Path) -> Result<()> {
 
             if (is_target_file || is_in_bin) && !file.is_dir() {
                 let dest_path = target_dir.join("bin").join(file_name);
-                std::fs::create_dir_all(dest_path.parent().unwrap())?;
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let mut outfile = std::fs::File::create(&dest_path)?;
                 std::io::copy(&mut file, &mut outfile)?;
 
@@ -290,12 +291,14 @@ fn add_to_path(path: &Path) {
         let mut paths = std::env::split_paths(&current_path).collect::<Vec<_>>();
         paths.push(path.to_path_buf());
         if let Ok(new_path) = std::env::join_paths(paths) {
+            // SAFETY: mutating process PATH during startup before multi-threaded worker pools are active.
             unsafe {
                 std::env::set_var("PATH", new_path);
             }
             info!("Added {:?} to process PATH", path);
         }
     } else {
+        // SAFETY: mutating process PATH during startup before multi-threaded worker pools are active.
         unsafe {
             std::env::set_var("PATH", new_path_os);
         }

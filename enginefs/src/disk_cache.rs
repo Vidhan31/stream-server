@@ -102,15 +102,12 @@ impl DiskCacheManager {
         let mut bytes_written = 0u64;
 
         for piece_idx in first_piece..=last_piece {
-            let piece_data = match piece_cache.get_piece(info_hash, piece_idx).await {
-                Some(data) => data,
-                None => {
-                    warn!(
-                        "DiskCache: Missing piece {} for {} — file incomplete, aborting persist",
-                        piece_idx, info_hash
-                    );
-                    return None;
-                }
+            let Some(piece_data) = piece_cache.get_piece(info_hash, piece_idx).await else {
+                warn!(
+                    "DiskCache: Missing piece {} for {} — file incomplete, aborting persist",
+                    piece_idx, info_hash
+                );
+                return None;
             };
 
             // For the first piece, skip bytes before file_offset
@@ -141,7 +138,7 @@ impl DiskCacheManager {
 
         // Write to disk
         match tokio::fs::write(&output_path, &file_data).await {
-            Ok(_) => {
+            Ok(()) => {
                 info!(
                     "DiskCache: Persisted {} ({} bytes) to {:?}",
                     file_name, file_size, output_path

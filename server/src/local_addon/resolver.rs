@@ -14,7 +14,7 @@ struct ImdbNode {
     _q: Option<String>, // Type (feature, TV series, etc)
 }
 
-pub async fn resolve_imdb(
+pub(crate) async fn resolve_imdb(
     client: &Client,
     title: &str,
     year: Option<i32>,
@@ -36,7 +36,7 @@ pub async fn resolve_imdb(
     {
         let end = text.rfind("})").unwrap_or(text.len());
         if start + 1 < end + 1 {
-            let json_part = &text[start + 1..end + 1];
+            let json_part = &text[(start + 1)..=end];
             if let Ok(result) = serde_json::from_str::<ImdbResult>(json_part)
                 && let Some(nodes) = result.d
             {

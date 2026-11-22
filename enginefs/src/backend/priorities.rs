@@ -71,6 +71,7 @@ impl PlaybackIntent {
         matches!(self, Self::HlsInitial | Self::HlsSeek | Self::HlsSequential)
     }
 
+    #[must_use]
     pub fn sequential_after_first_byte(self) -> Self {
         match self {
             Self::DirectInitial | Self::DirectSeek | Self::DirectSequential => {
@@ -82,6 +83,7 @@ impl PlaybackIntent {
         }
     }
 
+    #[must_use]
     pub fn seek_for_same_family(self) -> Self {
         if self.is_hls() {
             Self::HlsSeek
@@ -126,14 +128,14 @@ pub fn disk_backed_forward_window_pieces(intent: PlaybackIntent) -> i32 {
         PlaybackIntent::DownloadRange => 8,
         PlaybackIntent::DirectInitial | PlaybackIntent::HlsInitial => MAX_STARTUP_PIECES,
         PlaybackIntent::DirectSeek | PlaybackIntent::DirectSequential => 32,
-        PlaybackIntent::HlsSeek | PlaybackIntent::HlsSequential => 16,
+        PlaybackIntent::HlsSeek
+        | PlaybackIntent::HlsSequential
         // The container seek index (MKV Cues / MP4 moov) spans several pieces;
         // 16 lets the 16 MB MAX_CONTAINER_METADATA_WINDOW_BYTES cap govern (via
         // cap_pieces_by_bytes) so the whole region downloads in parallel instead
         // of one rare piece at a time.
-        PlaybackIntent::ContainerMetadata => 16,
-        PlaybackIntent::InternalProbe => 1,
-        PlaybackIntent::Background => 1,
+        | PlaybackIntent::ContainerMetadata => 16,
+        PlaybackIntent::InternalProbe | PlaybackIntent::Background => 1,
     }
 }
 
@@ -207,7 +209,7 @@ impl Default for EngineCacheConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PriorityContext {
     pub intent: PlaybackIntent,
     pub current_piece: i32,
@@ -441,17 +443,17 @@ fn hot_byte_cap(ctx: &PriorityContext) -> u64 {
         PlaybackIntent::DirectInitial | PlaybackIntent::HlsInitial if !ctx.first_byte_sent => {
             MAX_STARTUP_WINDOW_BYTES
         }
-        PlaybackIntent::DirectInitial | PlaybackIntent::HlsInitial => MAX_SEEK_HOT_WINDOW_BYTES,
-        PlaybackIntent::DirectSeek
+        PlaybackIntent::DirectInitial
+        | PlaybackIntent::HlsInitial
+        | PlaybackIntent::DirectSeek
         | PlaybackIntent::HlsSeek
         | PlaybackIntent::DirectSequential
         | PlaybackIntent::HlsSequential => MAX_SEEK_HOT_WINDOW_BYTES,
         PlaybackIntent::DownloadFull => MAX_WARM_WINDOW_BYTES,
         PlaybackIntent::DownloadRange => MAX_DOWNLOAD_RANGE_WINDOW_BYTES,
-        PlaybackIntent::ContainerMetadata | PlaybackIntent::InternalProbe => {
-            MAX_CONTAINER_METADATA_WINDOW_BYTES
-        }
-        PlaybackIntent::Background => MAX_CONTAINER_METADATA_WINDOW_BYTES,
+        PlaybackIntent::ContainerMetadata
+        | PlaybackIntent::InternalProbe
+        | PlaybackIntent::Background => MAX_CONTAINER_METADATA_WINDOW_BYTES,
     }
 }
 

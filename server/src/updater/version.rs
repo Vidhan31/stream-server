@@ -10,7 +10,7 @@ pub enum UpdateChannel {
     Prerelease,
 }
 
-pub fn current_version() -> Version {
+pub(crate) fn current_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))
 }
 
@@ -26,7 +26,7 @@ pub fn current_version() -> Version {
 ///
 /// Pre-release suffixes (e.g. `-beta.1`) are forwarded to `semver` as-is
 /// after the numeric normalisation.
-pub fn parse_release_tag(tag: &str) -> Option<Version> {
+pub(crate) fn parse_release_tag(tag: &str) -> Option<Version> {
     let tag = tag.strip_prefix('v').unwrap_or(tag);
 
     // Split off an optional pre-release / build-metadata suffix that
@@ -73,12 +73,12 @@ pub fn parse_release_tag(tag: &str) -> Option<Version> {
 /// `current_version()` already returns a valid 3-component semver
 /// (e.g. `0.1.7`).  We re-encode it as `0.1.70000` so that
 /// `0.1.7.2` (→ `0.1.70002`) is correctly detected as newer.
-pub fn normalize_current_version() -> Version {
+pub(crate) fn normalize_current_version() -> Version {
     let v = current_version();
     Version::new(v.major, v.minor, v.patch * 10000)
 }
 
-pub fn is_newer(candidate: &Version, current: &Version) -> bool {
+pub(crate) fn is_newer(candidate: &Version, current: &Version) -> bool {
     candidate > current
 }
 

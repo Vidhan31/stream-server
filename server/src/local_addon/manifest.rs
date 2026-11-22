@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     pub id: String,
     pub version: String,
     pub name: String,
@@ -15,13 +15,13 @@ pub struct Manifest {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Resource {
+pub(crate) enum Resource {
     Short(String),
     Full(ResourceObject),
 }
 
 #[derive(Serialize)]
-pub struct ResourceObject {
+pub(crate) struct ResourceObject {
     pub name: String,
     pub types: Vec<String>,
     #[serde(rename = "idPrefixes")]
@@ -29,13 +29,13 @@ pub struct ResourceObject {
 }
 
 #[derive(Serialize)]
-pub struct Catalog {
+pub(crate) struct Catalog {
     pub r#type: String,
     pub id: String,
     pub name: String,
 }
 
-pub fn get_manifest() -> Manifest {
+pub(crate) fn get_manifest() -> Manifest {
     Manifest {
         id: "org.stremio.local.rust".to_string(),
         version: "1.0.0".to_string(),

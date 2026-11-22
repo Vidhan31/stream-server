@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
-pub enum BValue {
+pub(crate) enum BValue {
     Int(i64),
     Str(Vec<u8>),
     List(Vec<BValue>),
@@ -9,35 +9,35 @@ pub enum BValue {
 }
 
 impl BValue {
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             BValue::Str(bytes) => std::str::from_utf8(bytes).ok(),
             _ => None,
         }
     }
 
-    pub fn as_bytes(&self) -> Option<&[u8]> {
+    pub(crate) fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             BValue::Str(bytes) => Some(bytes),
             _ => None,
         }
     }
 
-    pub fn get_dict(&self) -> Option<&BTreeMap<Vec<u8>, BValue>> {
+    pub(crate) fn get_dict(&self) -> Option<&BTreeMap<Vec<u8>, BValue>> {
         match self {
             BValue::Dict(map) => Some(map),
             _ => None,
         }
     }
 
-    pub fn get_list(&self) -> Option<&Vec<BValue>> {
+    pub(crate) fn get_list(&self) -> Option<&Vec<BValue>> {
         match self {
             BValue::List(list) => Some(list),
             _ => None,
         }
     }
 
-    pub fn get_int(&self) -> Option<i64> {
+    pub(crate) fn get_int(&self) -> Option<i64> {
         match self {
             BValue::Int(i) => Some(*i),
             _ => None,
@@ -45,18 +45,18 @@ impl BValue {
     }
 }
 
-pub struct Torrent {
+pub(crate) struct Torrent {
     pub info_hash: String,
     pub files: Vec<TorrentFile>,
     pub _name: Option<String>,
 }
 
-pub struct TorrentFile {
+pub(crate) struct TorrentFile {
     pub path: String,
     pub _length: u64,
 }
 
-pub fn parse_torrent(bytes: &[u8]) -> Result<Torrent, String> {
+pub(crate) fn parse_torrent(bytes: &[u8]) -> Result<Torrent, String> {
     let (root, _) = parse_bencode(bytes).map_err(|_| "Invalid bencode")?;
     let dict = root.get_dict().ok_or("Root not a dict")?;
 
@@ -75,7 +75,7 @@ pub fn parse_torrent(bytes: &[u8]) -> Result<Torrent, String> {
     let name = info_dict
         .get(b"name".as_slice())
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let mut files = Vec::new();
 
@@ -88,7 +88,7 @@ pub fn parse_torrent(bytes: &[u8]) -> Result<Torrent, String> {
             if let Some(f_dict) = file_dict.get_dict() {
                 let length = f_dict
                     .get(b"length".as_slice())
-                    .and_then(|v| v.get_int())
+                    .and_then(BValue::get_int)
                     .unwrap_or(0) as u64;
                 let path_list = f_dict.get(b"path".as_slice()).and_then(|v| v.get_list());
                 if let Some(p_list) = path_list {
@@ -111,7 +111,7 @@ pub fn parse_torrent(bytes: &[u8]) -> Result<Torrent, String> {
         // Single-file
         let length = info_dict
             .get(b"length".as_slice())
-            .and_then(|v| v.get_int())
+            .and_then(BValue::get_int)
             .unwrap_or(0) as u64;
         if let Some(n) = &name {
             files.push(TorrentFile {
@@ -252,7 +252,7 @@ impl Sha1 {
     }
 }
 
-pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1_digest(data: &[u8]) -> [u8; 20] {
     let mut sha1 = Sha1::new();
     // Padding
     let mut padded = Vec::with_capacity(data.len() + 64);

@@ -6,21 +6,21 @@ use async_rar::AsyncRarArchive;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt; // Import AsyncWriteExt for write_all
 
-pub struct RarHandler {
+pub(crate) struct RarHandler {
     path: PathBuf,
     cache_config: CacheConfig,
 }
 
 impl RarHandler {
     #[allow(dead_code)]
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
             cache_config: CacheConfig::default(),
         }
     }
 
-    pub fn new_with_config(path: PathBuf, cache_config: CacheConfig) -> Self {
+    pub(crate) fn new_with_config(path: PathBuf, cache_config: CacheConfig) -> Self {
         Self { path, cache_config }
     }
 }

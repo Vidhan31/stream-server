@@ -2,19 +2,19 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query},
-    http::{StatusCode, header},
+    http::header,
     response::{IntoResponse, Response},
     routing::get,
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
 #[derive(Debug, Deserialize)]
-pub struct TranscodeParams {
+pub(crate) struct TranscodeParams {
     pub video: String,
     pub time: Option<f64>,
     #[serde(rename = "audioTrack")]
@@ -25,18 +25,31 @@ pub struct TranscodeParams {
     pub _subtitles_delay: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PlayerParams {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct PlayerParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<String>,
-    #[serde(rename = "audioTrack")]
+    #[serde(rename = "audioTrack", skip_serializing_if = "Option::is_none")]
     pub audio_track: Option<usize>,
 }
 
-pub fn router() -> Router<AppState> {
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PlayerControlResponse {
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    pub status: &'static str,
+    pub params: PlayerParams,
+}
+
+pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_devices))
         .route("/transcode", get(transcode))
@@ -45,66 +58,54 @@ pub fn router() -> Router<AppState> {
         .route("/{devID}/player", get(player_control).post(player_control))
 }
 
-pub async fn list_devices(
+pub(crate) async fn list_devices(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl IntoResponse {
     let devices = state.devices.read().await;
     Json(devices.clone())
 }
 
-pub async fn get_device(Path(dev_id): Path<String>) -> AppResult<Json<crate::ssdp::Device>> {
-    Err(AppError::not_found(format!("Device {} not found", dev_id)))
+pub(crate) async fn get_device(Path(dev_id): Path<String>) -> AppResult<Json<crate::ssdp::Device>> {
+    Err(AppError::not_found(format!("Device {dev_id} not found")))
 }
 
-pub async fn transcode(Query(params): Query<TranscodeParams>) -> AppResult {
+pub(crate) async fn transcode(Query(params): Query<TranscodeParams>) -> AppResult {
     let video_url = params.video;
     let offset = params.time.unwrap_or(0.0);
     let is_fmp4 = params.fmp4.is_some();
-
-    let mut args = vec![
-        "-copyts".to_string(),
-        "-ss".to_string(),
-        offset.to_string(),
-        "-i".to_string(),
-        video_url,
-    ];
-
-    args.extend(vec![
-        "-c:v".to_string(),
-        "libx264".to_string(),
-        "-preset".to_string(),
-        "ultrafast".to_string(),
-        "-tune".to_string(),
-        "zerolatency".to_string(),
-        "-pix_fmt".to_string(),
-        "yuv420p".to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-ac".to_string(),
-        "2".to_string(),
-        "-threads".to_string(),
-        "0".to_string(),
-    ]);
-
-    if is_fmp4 {
-        args.extend(vec![
-            "-movflags".to_string(),
-            "frag_keyframe+empty_moov".to_string(),
-            "-f".to_string(),
-            "mp4".to_string(),
-        ]);
-    } else {
-        args.extend(vec!["-f".to_string(), "matroska".to_string()]);
-    }
-
-    args.push("pipe:1".to_string());
+    let offset_str = offset.to_string();
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["-copyts", "-ss", &offset_str, "-i", &video_url])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-threads",
+            "0",
+        ]);
+
+    if is_fmp4 {
+        cmd.args(["-movflags", "frag_keyframe+empty_moov", "-f", "mp4"]);
+    } else {
+        cmd.args(["-f", "matroska"]);
+    }
+
+    cmd.arg("pipe:1");
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to spawn ffmpeg: {}", e)))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to spawn ffmpeg: {e}")))?;
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stream = ReaderStream::new(stdout);
@@ -123,34 +124,25 @@ pub async fn transcode(Query(params): Query<TranscodeParams>) -> AppResult {
             "contentFeatures.dlna.org",
             "DLNA.ORG_OP=01;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01300000000000000000000000000000",
         )
-        .body(axum::body::Body::from_stream(stream))
-        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to build response: {}", e)))
+        .body(Body::from_stream(stream))
+        .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to build response: {e}")))
 }
 
-pub async fn player_control(
+pub(crate) async fn player_control(
     method: axum::http::Method,
     Path(dev_id): Path<String>,
     Query(query_params): Query<PlayerParams>,
     body: Option<Json<PlayerParams>>,
-) -> impl IntoResponse {
+) -> Json<PlayerControlResponse> {
     let params = if method == axum::http::Method::POST {
-        body.map(|Json(b)| b).unwrap_or(query_params)
+        body.map_or(query_params, |Json(b)| b)
     } else {
         query_params
     };
 
-    let response_json = json!({
-        "deviceId": dev_id,
-        "status": "not_implemented",
-        "params": {
-            "source": params.source,
-            "paused": params.paused,
-            "time": params.time,
-            "volume": params.volume,
-            "stop": params.stop,
-            "audio_track": params.audio_track
-        }
-    });
-
-    Json(response_json)
+    Json(PlayerControlResponse {
+        device_id: dev_id,
+        status: "not_implemented",
+        params,
+    })
 }

@@ -1,44 +1,35 @@
 use axum::{
-    body::Body,
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use regex::RegexBuilder;
-use serde_json::json;
 
-pub const LOCAL_BASE_URL: &str = "http://127.0.0.1:11470";
-pub const DLNA_TRANSFER_MODE: &str = "Streaming";
-pub const DLNA_CONTENT_FEATURES: &str =
+pub(crate) const LOCAL_BASE_URL: &str = "http://127.0.0.1:11470";
+pub(crate) const DLNA_TRANSFER_MODE: &str = "Streaming";
+pub(crate) const DLNA_CONTENT_FEATURES: &str =
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
 #[derive(Debug, Clone)]
-pub struct FileCandidate {
+pub(crate) struct FileCandidate {
     pub index: usize,
     pub name: String,
     pub length: u64,
 }
 
-pub fn query_values(query: Option<&str>, name: &str) -> Vec<String> {
-    query
-        .map(|q| {
-            q.split('&')
-                .filter(|field| field.split_once('=').unwrap_or((field, "")).0 == name)
-                .filter_map(|field| {
-                    url::form_urlencoded::parse(field.as_bytes())
-                        .next()
-                        .map(|(_, value)| value.into_owned())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+pub(crate) fn query_values(query: Option<&str>, name: &str) -> Vec<String> {
+    query.map_or_default(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .filter_map(|(k, v)| (k == name).then(|| v.into_owned()))
+            .collect()
+    })
 }
 
-pub fn normalize_tracker_sources(sources: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_tracker_sources(sources: Vec<String>) -> Vec<String> {
     sources
         .into_iter()
         .filter_map(|source| {
             let decoded = urlencoding::decode(&source)
-                .map(|cow| cow.into_owned())
+                .map(std::borrow::Cow::into_owned)
                 .unwrap_or(source);
             let trimmed = decoded.trim();
             if trimmed.is_empty() || trimmed.starts_with("dht:") {
@@ -52,7 +43,7 @@ pub fn normalize_tracker_sources(sources: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-pub fn basename(path: &str) -> &str {
+pub(crate) fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\'])
         .find(|part| !part.is_empty() && *part != "." && *part != "..")
         .unwrap_or("download")
@@ -96,7 +87,7 @@ fn ascii_fallback(name: &str) -> String {
     }
 }
 
-pub fn content_disposition_attachment(path: &str) -> HeaderValue {
+pub(crate) fn content_disposition_attachment(path: &str) -> HeaderValue {
     let cleaned = clean_filename_component(basename(path));
     let fallback = ascii_fallback(&cleaned);
     let encoded = urlencoding::encode(&cleaned);
@@ -107,14 +98,15 @@ pub fn content_disposition_attachment(path: &str) -> HeaderValue {
     .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"download\""))
 }
 
-pub fn content_disposition_inline(path: &str) -> HeaderValue {
+#[allow(dead_code)]
+pub(crate) fn content_disposition_inline(path: &str) -> HeaderValue {
     let cleaned = clean_filename_component(basename(path));
     let fallback = ascii_fallback(&cleaned);
     HeaderValue::from_str(&format!("inline; filename=\"{}\"", fallback))
         .unwrap_or_else(|_| HeaderValue::from_static("inline; filename=\"download\""))
 }
 
-pub fn add_dlna_headers(headers: &mut HeaderMap) {
+pub(crate) fn add_dlna_headers(headers: &mut HeaderMap) {
     headers.insert(
         "transferMode.dlna.org",
         HeaderValue::from_static(DLNA_TRANSFER_MODE),
@@ -125,7 +117,7 @@ pub fn add_dlna_headers(headers: &mut HeaderMap) {
     );
 }
 
-pub fn resolve_file_idx(
+pub(crate) fn resolve_file_idx(
     requested_idx: &str,
     files: &[FileCandidate],
     filters: &[String],
@@ -164,7 +156,7 @@ pub fn resolve_file_idx(
         .ok_or_else(|| "No playable file found".to_string())
 }
 
-pub fn is_video_name(name: &str) -> bool {
+pub(crate) fn is_video_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.rsplit('.').next(),
@@ -172,13 +164,12 @@ pub fn is_video_name(name: &str) -> bool {
     )
 }
 
-pub fn file_matches_filter(name: &str, filter: &str) -> bool {
+pub(crate) fn file_matches_filter(name: &str, filter: &str) -> bool {
     if let Some((pattern, flags)) = parse_regex_filter(filter) {
         return RegexBuilder::new(pattern)
             .case_insensitive(flags.contains('i'))
             .build()
-            .map(|regex| regex.is_match(name))
-            .unwrap_or(false);
+            .is_ok_and(|regex| regex.is_match(name));
     }
 
     name.to_ascii_lowercase()
@@ -193,7 +184,7 @@ fn parse_regex_filter(filter: &str) -> Option<(&str, &str)> {
     (last_slash > 0).then(|| (&filter[1..last_slash], &filter[last_slash + 1..]))
 }
 
-pub fn parse_media_url(media_url: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_media_url(media_url: &str) -> Result<(String, String), String> {
     let normalized = if media_url.starts_with('/') {
         format!("{}{}", LOCAL_BASE_URL, media_url)
     } else {
@@ -204,8 +195,7 @@ pub fn parse_media_url(media_url: &str) -> Result<(String, String), String> {
         .map_err(|err| format!("Invalid media URL: {err}"))?;
     let segments = parsed
         .path_segments()
-        .map(|segments| segments.collect::<Vec<_>>())
-        .unwrap_or_default();
+        .map_or_default(std::iter::Iterator::collect::<Vec<_>>);
 
     let info_pos = segments
         .iter()
@@ -221,11 +211,11 @@ pub fn parse_media_url(media_url: &str) -> Result<(String, String), String> {
     ))
 }
 
-pub fn is_info_hash(value: &str) -> bool {
+pub(crate) fn is_info_hash(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-pub fn parse_hls_id(id: &str) -> Option<(String, usize)> {
+pub(crate) fn parse_hls_id(id: &str) -> Option<(String, usize)> {
     let decoded = urlencoding::decode(id).ok()?.into_owned();
     let (info_hash, file_idx) = decoded.rsplit_once('-')?;
     if !is_info_hash(info_hash) {
@@ -235,16 +225,13 @@ pub fn parse_hls_id(id: &str) -> Option<(String, usize)> {
     Some((info_hash.to_ascii_lowercase(), file_idx))
 }
 
-pub fn unsupported(feature: &str) -> Response {
+pub(crate) fn unsupported(feature: &str) -> Response {
     crate::error::AppError::Unsupported(Box::leak(feature.to_string().into_boxed_str()))
         .into_response()
 }
 
-pub fn empty_ok() -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::empty())
-        .unwrap()
+pub(crate) fn empty_ok() -> Response {
+    StatusCode::OK.into_response()
 }
 
 #[cfg(test)]

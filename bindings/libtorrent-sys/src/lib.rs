@@ -2,6 +2,16 @@
 //!
 //! This crate provides safe Rust bindings to the full libtorrent C++ library API.
 
+#![allow(
+    clippy::fn_params_excessive_bools,
+    clippy::undocumented_unsafe_blocks,
+    clippy::needless_pass_by_value,
+    clippy::semicolon_if_nothing_returned,
+    clippy::missing_safety_doc,
+    clippy::uninlined_format_args,
+    clippy::must_use_candidate
+)]
+
 #[cxx::bridge(namespace = "libtorrent_wrapper")]
 mod ffi {
     // ============================================================================

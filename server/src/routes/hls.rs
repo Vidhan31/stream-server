@@ -1,4 +1,4 @@
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use crate::routes::compat;
 use crate::state::AppState;
 use axum::{
@@ -13,20 +13,20 @@ use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
 #[derive(Deserialize)]
-pub struct ProbeQuery {
+pub(crate) struct ProbeQuery {
     #[serde(rename = "mediaURL")]
     pub media_url: Option<String>,
     pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HlsPlaylistType {
+pub(crate) enum HlsPlaylistType {
     Video,
     Audio(usize),
 }
 
 impl HlsPlaylistType {
-    pub fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         let name = name.strip_suffix(".m3u8")?;
         if let Some(audio) = name.strip_prefix("audio-") {
             audio.parse::<usize>().ok().map(Self::Audio)
@@ -35,7 +35,7 @@ impl HlsPlaylistType {
         }
     }
 
-    pub fn audio_track_idx(&self) -> Option<usize> {
+    pub(crate) fn audio_track_idx(&self) -> Option<usize> {
         match self {
             Self::Audio(idx) => Some(*idx),
             Self::Video => None,
@@ -44,13 +44,13 @@ impl HlsPlaylistType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HlsSegmentTarget {
+pub(crate) enum HlsSegmentTarget {
     Video(usize),
     Audio { track_idx: usize, seg_idx: usize },
 }
 
 impl HlsSegmentTarget {
-    pub fn parse(segment: &str) -> Result<Self, AppError> {
+    pub(crate) fn parse(segment: &str) -> Result<Self, AppError> {
         let name = segment.strip_suffix(".ts").ok_or_else(|| {
             AppError::bad_request(format!("Invalid segment extension: {segment}"))
         })?;
@@ -74,14 +74,14 @@ impl HlsSegmentTarget {
         }
     }
 
-    pub fn seg_index(&self) -> usize {
+    pub(crate) fn seg_index(&self) -> usize {
         match *self {
             Self::Video(idx) => idx,
             Self::Audio { seg_idx, .. } => seg_idx,
         }
     }
 
-    pub fn audio_track_idx(&self) -> Option<usize> {
+    pub(crate) fn audio_track_idx(&self) -> Option<usize> {
         match *self {
             Self::Audio { track_idx, .. } => Some(track_idx),
             Self::Video(_) => None,
@@ -105,39 +105,82 @@ fn hls_stream_url(base_url: &str, info_hash: &str, file_idx: usize) -> String {
     )
 }
 
-fn stremio_probe_json(
-    info_hash: &str,
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct StremioProbeResponse<'a> {
+    #[serde(rename = "infoHash")]
+    pub info_hash: &'a str,
+    #[serde(rename = "fileIdx")]
+    pub file_idx: usize,
+    pub format: StremioProbeFormat,
+    pub duration: f64,
+    pub streams: Vec<StremioProbeStream<'a>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct StremioProbeFormat {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct StremioProbeStream<'a> {
+    pub index: usize,
+    pub track: &'a str,
+    pub codec: &'a str,
+    pub channels: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<&'a str>,
+    pub default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<&'a str>,
+}
+
+fn stremio_probe_response<'a>(
+    info_hash: &'a str,
     file_idx: usize,
-    probe: &enginefs::hls::ProbeResult,
-) -> serde_json::Value {
-    serde_json::json!({
-        "infoHash": info_hash,
-        "fileIdx": file_idx,
-        "format": {
-            "name": stremio_format_name(&probe.container)
+    probe: &'a enginefs::hls::ProbeResult,
+) -> StremioProbeResponse<'a> {
+    StremioProbeResponse {
+        info_hash,
+        file_idx,
+        format: StremioProbeFormat {
+            name: stremio_format_name(&probe.container),
         },
-        "duration": probe.duration,
-        "streams": probe.streams.iter().map(|stream| {
-            serde_json::json!({
-                "index": stream.index,
-                "track": stream.codec_type,
-                "codec": stream.codec_name,
-                "channels": if stream.codec_type == "audio" { stream.channels.unwrap_or(2) } else { 0 },
-                "width": stream.width,
-                "height": stream.height,
-                "fps": stream.fps,
-                "bitrate": stream.bitrate,
-                "lang": stream.lang,
-                "default": stream.is_default,
-                "profile": stream.profile,
+        duration: probe.duration,
+        streams: probe
+            .streams
+            .iter()
+            .map(|stream| StremioProbeStream {
+                index: stream.index,
+                track: &stream.codec_type,
+                codec: &stream.codec_name,
+                channels: if stream.codec_type == "audio" {
+                    stream.channels.map_or(2, u32::from)
+                } else {
+                    0
+                },
+                width: stream.width,
+                height: stream.height,
+                fps: stream.fps,
+                bitrate: stream.bitrate,
+                lang: stream.lang.as_deref(),
+                default: stream.is_default,
+                profile: stream.profile.as_deref(),
             })
-        }).collect::<Vec<_>>()
-    })
+            .collect(),
+    }
 }
 
 /// Probe endpoint using mediaURL query parameter (for Stremio compatibility)
 /// GET /hlsv2/probe?mediaURL=http://127.0.0.1:11470/{infoHash}/{fileIdx}?
-pub async fn probe_by_url(
+pub(crate) async fn probe_by_url(
     State(state): State<AppState>,
     Query(params): Query<ProbeQuery>,
 ) -> Response {
@@ -189,19 +232,19 @@ pub async fn probe_by_url(
         "HLS probe request completed"
     );
 
-    Json(stremio_probe_json(&info_hash, file_idx, &probe)).into_response()
+    Json(stremio_probe_response(&info_hash, file_idx, &probe)).into_response()
 }
 
 /// Query params for HLS endpoints
 #[derive(Deserialize)]
-pub struct HlsQuery {
+pub(crate) struct HlsQuery {
     #[serde(rename = "mediaURL")]
     pub media_url: Option<String>,
 }
 
 /// Master playlist endpoint using mediaURL query parameter (for Stremio compatibility)
 /// GET /hlsv2/{hash}/master.m3u8?mediaURL=http://127.0.0.1:11470/{infoHash}/{fileIdx}?
-pub async fn master_playlist_by_url(
+pub(crate) async fn master_playlist_by_url(
     State(state): State<AppState>,
     Path(_hash): Path<String>,
     _headers: axum::http::HeaderMap,
@@ -275,7 +318,7 @@ pub async fn master_playlist_by_url(
         .into_response()
 }
 
-pub async fn get_master_playlist(
+pub(crate) async fn get_master_playlist(
     State(state): State<AppState>,
     Path((info_hash, file_idx)): Path<(String, usize)>,
     _headers: axum::http::HeaderMap,
@@ -345,7 +388,7 @@ pub async fn get_master_playlist(
 
 // Dispatcher for stream playlist or segment to avoid route conflict
 // {file_idx} can be numeric (0, 1) or text (subtitle4, audio-1)
-pub async fn handle_hls_resource(
+pub(crate) async fn handle_hls_resource(
     State(state): State<AppState>,
     _headers: axum::http::HeaderMap,
     Path((info_hash, file_idx_str, resource)): Path<(String, String, String)>,
@@ -405,7 +448,7 @@ pub async fn handle_hls_resource(
 }
 
 // Handler for fMP4 nested paths like /hlsv2/{infoHash}/{fileIdx}/video0/init.mp4
-pub async fn handle_hls_fmp4_segment(
+pub(crate) async fn handle_hls_fmp4_segment(
     State(state): State<AppState>,
     _headers: axum::http::HeaderMap,
     Path((info_hash, file_idx_str, track, segment)): Path<(String, String, String, String)>,
@@ -537,8 +580,7 @@ async fn get_segment(
         stats
             .files
             .get(file_idx)
-            .map(|f| f.progress >= 0.99)
-            .unwrap_or(false)
+            .is_some_and(|f| f.progress >= 0.99)
     };
 
     let transcode_input_path = if is_fully_downloaded {
@@ -591,9 +633,7 @@ async fn get_segment(
             duration,
             audio_idx,
             &config,
-        )
-        .await
-        {
+        ) {
             Ok(c) => c,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         }
@@ -610,9 +650,7 @@ async fn get_segment(
             start,
             duration,
             &config,
-        )
-        .await
-        {
+        ) {
             Ok(c) => c,
             Err(e) => {
                 if config.uses_hardware_encoder() {
@@ -623,9 +661,7 @@ async fn get_segment(
                         start,
                         duration,
                         &config,
-                    )
-                    .await
-                    {
+                    ) {
                         Ok(c) => c,
                         Err(e) => {
                             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -668,9 +704,7 @@ async fn get_segment(
                 start,
                 duration,
                 &config,
-            )
-            .await
-            {
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -709,7 +743,7 @@ async fn get_segment(
         .into_response()
 }
 
-pub async fn get_probe(
+pub(crate) async fn get_probe(
     State(state): State<AppState>,
     Path((info_hash, file_idx)): Path<(String, usize)>,
 ) -> Response {
@@ -745,8 +779,7 @@ async fn resolve_hls_file_idx<H: TorrentHandle>(
 ) -> Result<usize, String> {
     let filters = url::Url::parse(media_url)
         .ok()
-        .map(|url| compat::query_values(url.query(), "f"))
-        .unwrap_or_default();
+        .map_or_default(|url| compat::query_values(url.query(), "f"));
     let files = engine.handle.get_files().await;
     let candidates = files
         .iter()
@@ -760,9 +793,12 @@ async fn resolve_hls_file_idx<H: TorrentHandle>(
     compat::resolve_file_idx(requested_idx, &candidates, &filters)
 }
 
-pub async fn get_tracks_by_url(State(state): State<AppState>, Path(url): Path<String>) -> Response {
+pub(crate) async fn get_tracks_by_url(
+    State(state): State<AppState>,
+    Path(url): Path<String>,
+) -> Response {
     let decoded = urlencoding::decode(&url)
-        .map(|value| value.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .unwrap_or(url);
 
     if let Some((info_hash, file_idx)) = parse_tracks_path(&decoded) {
@@ -788,19 +824,19 @@ pub async fn get_tracks_by_url(State(state): State<AppState>, Path(url): Path<St
         Ok(parts) => parts,
         Err(err) => {
             tracing::warn!(error = %err, path = media_url.split('?').next(), "tracks URL parse failed");
-            return Json(Vec::<serde_json::Value>::new()).into_response();
+            return Json(Vec::<enginefs::hls::VideoStream>::new()).into_response();
         }
     };
 
     let engine = match state.stream_engine().get_engine(&info_hash).await {
         Some(engine) => engine,
-        None => return Json(Vec::<serde_json::Value>::new()).into_response(),
+        None => return Json(Vec::<enginefs::hls::VideoStream>::new()).into_response(),
     };
     let file_idx = match resolve_hls_file_idx(&engine, &requested_idx, &media_url).await {
         Ok(idx) => idx,
         Err(err) => {
             tracing::warn!(error = %err, path = media_url.split('?').next(), "tracks file index resolve failed");
-            return Json(Vec::<serde_json::Value>::new()).into_response();
+            return Json(Vec::<enginefs::hls::VideoStream>::new()).into_response();
         }
     };
     state
@@ -811,7 +847,7 @@ pub async fn get_tracks_by_url(State(state): State<AppState>, Path(url): Path<St
         Ok(probe) => probe,
         Err(err) => {
             tracing::warn!(error = %err, path = media_url.split('?').next(), "tracks probe failed");
-            return Json(Vec::<serde_json::Value>::new()).into_response();
+            return Json(Vec::<enginefs::hls::VideoStream>::new()).into_response();
         }
     };
     Json(probe.streams).into_response()
@@ -831,11 +867,11 @@ fn parse_tracks_path(path: &str) -> Option<(String, usize)> {
         .map(|idx| (info_hash.to_ascii_lowercase(), idx))
 }
 
-pub async fn hls_status() -> Response {
-    Json(serde_json::json!({})).into_response()
+pub(crate) async fn hls_status() -> Response {
+    Json(super::engine::EmptyResponse {}).into_response()
 }
 
-pub async fn hls_destroy(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn hls_destroy(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if let Some((info_hash, file_idx)) = compat::parse_hls_id(&id) {
         state
             .stream_engine()
@@ -846,15 +882,12 @@ pub async fn hls_destroy(State(state): State<AppState>, Path(id): Path<String>) 
     compat::empty_ok()
 }
 
-pub async fn hls_burn(Path(id): Path<String>) -> Response {
+pub(crate) async fn hls_burn(Path(id): Path<String>) -> Response {
     tracing::warn!(id = %id, "hls subtitle burn-in is not implemented");
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap()
+    StatusCode::NO_CONTENT.into_response()
 }
 
-pub async fn hls_v2_resource(
+pub(crate) async fn hls_v2_resource(
     State(state): State<AppState>,
     Path((id, resource)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
@@ -897,7 +930,7 @@ pub async fn hls_v2_resource(
     }
 }
 
-pub async fn legacy_hls_resource(
+pub(crate) async fn legacy_hls_resource(
     State(state): State<AppState>,
     method: axum::http::Method,
     uri: axum::http::Uri,
@@ -991,7 +1024,7 @@ pub async fn legacy_hls_resource(
     }
 }
 
-pub async fn legacy_hls_segment(
+pub(crate) async fn legacy_hls_segment(
     State(state): State<AppState>,
     method: axum::http::Method,
     uri: axum::http::Uri,

@@ -220,7 +220,7 @@ impl TorrentHandleTrait for LibtorrentTorrentHandle {
         Ok(())
     }
 
-    async fn set_upload_throttled(&self, _throttled: bool) -> Result<()> {
+    async fn set_upload_throttled(&self, _throttle: crate::backend::UploadThrottle) -> Result<()> {
         Ok(())
     }
 
@@ -779,11 +779,7 @@ impl TorrentHandleTrait for LibtorrentTorrentHandle {
             } else {
                 let mut ready = 0u32;
                 for ready_piece in piece..=last_piece.min(piece + target_pieces as i32 - 1) {
-                    if self
-                        .piece_cache
-                        .has_piece(&self.info_hash, ready_piece)
-                        .await
-                    {
+                    if self.piece_cache.has_piece(&self.info_hash, ready_piece) {
                         ready += 1;
                         continue;
                     }
@@ -794,8 +790,7 @@ impl TorrentHandleTrait for LibtorrentTorrentHandle {
                             break;
                         }
                         self.piece_cache
-                            .put_piece(&self.info_hash, ready_piece, piece_data)
-                            .await;
+                            .put_piece(&self.info_hash, ready_piece, piece_data);
                         self.piece_waiter
                             .notify_piece_finished(&self.info_hash, ready_piece);
                         ready += 1;

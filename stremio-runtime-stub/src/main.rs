@@ -136,8 +136,7 @@ fn validate_server_js(server_js: &OsString) -> Result<(), StubError> {
 fn real_server_path(exe_dir: &Path) -> PathBuf {
     env::var_os("STREMIO_REAL_SERVER_EXE")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| exe_dir.join("stream-server.exe"))
+        .map_or_else(|| exe_dir.join("stream-server.exe"), PathBuf::from)
 }
 
 fn spawn_real_server(real_server: &Path, exe_dir: &Path) -> Result<Child, StubError> {
@@ -170,7 +169,7 @@ fn monitor_existing_server() -> Result<i32, StubError> {
     loop {
         thread::sleep(EXISTING_SERVER_POLL_INTERVAL);
         if !endpoint_ready() {
-            eprintln!("external stream server disappeared at {}", ENDPOINT_LABEL);
+            eprintln!("external stream server disappeared at {ENDPOINT_LABEL}");
             return Ok(4);
         }
     }
@@ -187,7 +186,7 @@ fn endpoint_addr() -> SocketAddr {
 fn print_ready_line() -> Result<(), StubError> {
     let mut stdout = io::stdout();
     writeln!(stdout, "{READY_LINE}")
-        .and_then(|_| stdout.flush())
+        .and_then(|()| stdout.flush())
         .map_err(|err| StubError::unexpected(format!("failed to print readiness line: {err}")))
 }
 

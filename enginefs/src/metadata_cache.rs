@@ -66,10 +66,7 @@ impl MetadataCache {
     /// Check if metadata exists for a file
     pub fn contains(&self, info_hash: &str, file_index: usize) -> bool {
         let key = (info_hash.to_string(), file_index);
-        self.cache
-            .read()
-            .map(|c| c.contains_key(&key))
-            .unwrap_or(false)
+        self.cache.read().is_ok_and(|c| c.contains_key(&key))
     }
 
     /// Update just the keyframe offsets for a file

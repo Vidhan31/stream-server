@@ -322,8 +322,8 @@ fn restart_server(command: &[String]) -> Result<()> {
     Command::new(exe)
         .args(args)
         .spawn()
-        .with_context(|| format!("failed to restart {}", exe))?;
-    log_line(&format!("restarted {}", exe));
+        .with_context(|| format!("failed to restart {exe}"))?;
+    log_line(&format!("restarted {exe}"));
     Ok(())
 }
 
@@ -361,15 +361,11 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn appdata_dir() -> PathBuf {
-    env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(data_local_dir)
+    env::var_os("APPDATA").map_or_else(data_local_dir, PathBuf::from)
 }
 
 fn data_local_dir() -> PathBuf {
-    env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
+    env::var_os("LOCALAPPDATA").map_or_else(env::temp_dir, PathBuf::from)
 }
 
 fn log_line(line: &str) {

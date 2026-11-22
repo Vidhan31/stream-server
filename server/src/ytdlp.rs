@@ -8,8 +8,8 @@
 //! once it goes stale.
 
 use anyhow::{Context, Result, anyhow};
-use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -20,11 +20,11 @@ const PATH_OVERRIDE_ENV: &str = "STREMIO_YTDLP_PATH";
 /// Re-download the managed copy once it is older than this. YouTube breaks
 /// extractors far more often than the server ships, so this is deliberately
 /// shorter than a typical release cycle.
-const REFRESH_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const REFRESH_AFTER: Duration = Duration::from_hours(168);
 
 /// Resolution touches the filesystem and the network, so it is serialised: a
 /// burst of trailer hovers would otherwise start one download per request.
-static RESOLVE_LOCK: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+static RESOLVE_LOCK: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Returns a path to a usable `yt-dlp`, downloading it if there is no copy yet.
 pub async fn resolve(config_dir: &Path) -> Result<PathBuf> {

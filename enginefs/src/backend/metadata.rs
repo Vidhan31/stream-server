@@ -5,23 +5,29 @@ use tracing::{debug, info};
 /// EBML Element IDs for Matroska (defined for reference, parsing uses byte patterns)
 #[allow(dead_code)]
 mod ebml_ids {
-    pub const SEGMENT: u32 = 0x18538067;
-    pub const SEEK_HEAD: u32 = 0x114D9B74;
-    pub const SEEK: u32 = 0x4DBB;
-    pub const SEEK_ID: u32 = 0x53AB;
-    pub const SEEK_POSITION: u32 = 0x53AC;
-    pub const CUES: u32 = 0x1C53BB6B;
-    pub const CUE_POINT: u32 = 0xBB;
-    pub const CUE_TIME: u32 = 0xB3;
-    pub const CUE_TRACK_POSITIONS: u32 = 0xB7;
-    pub const CUE_CLUSTER_POSITION: u32 = 0xF1;
-    pub const CLUSTER: u32 = 0x1F43B675;
+    pub(super) const SEGMENT: u32 = 0x1853_8067;
+    pub(super) const SEEK_HEAD: u32 = 0x114D_9B74;
+    pub(super) const SEEK: u32 = 0x4DBB;
+    pub(super) const SEEK_ID: u32 = 0x53AB;
+    pub(super) const SEEK_POSITION: u32 = 0x53AC;
+    pub(super) const CUES: u32 = 0x1C53_BB6B;
+    pub(super) const CUE_POINT: u32 = 0xBB;
+    pub(super) const CUE_TIME: u32 = 0xB3;
+    pub(super) const CUE_TRACK_POSITIONS: u32 = 0xB7;
+    pub(super) const CUE_CLUSTER_POSITION: u32 = 0xF1;
+    pub(super) const CLUSTER: u32 = 0x1F43_B675;
 }
 
 pub enum ContainerType {
     Mp4,
     Matroska,
     Unknown,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkOffsetFormat {
+    Stco32,
+    Co64,
 }
 
 /// Represents a keyframe/cue point with its byte offset
@@ -93,13 +99,21 @@ impl MetadataInspector {
     }
 
     fn guess_container(filename: &str) -> ContainerType {
-        let name = filename.to_lowercase();
-        if name.ends_with(".mp4") || name.ends_with(".m4v") || name.ends_with(".mov") {
-            ContainerType::Mp4
-        } else if name.ends_with(".mkv") || name.ends_with(".webm") {
-            ContainerType::Matroska
-        } else {
-            ContainerType::Unknown
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str());
+        match ext {
+            Some(e)
+                if e.eq_ignore_ascii_case("mp4")
+                    || e.eq_ignore_ascii_case("m4v")
+                    || e.eq_ignore_ascii_case("mov") =>
+            {
+                ContainerType::Mp4
+            }
+            Some(e) if e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm") => {
+                ContainerType::Matroska
+            }
+            _ => ContainerType::Unknown,
         }
     }
 
@@ -247,7 +261,7 @@ impl MetadataInspector {
             return None;
         }
 
-        let mut value = (first as u64) & ((1 << (8 - len)) - 1);
+        let mut value = u64::from(first) & ((1 << (8 - len)) - 1);
         for &byte in data.iter().take(len).skip(1) {
             value = (value << 8) | u64::from(byte);
         }
@@ -464,7 +478,9 @@ impl MetadataInspector {
                 break;
             }
 
-            let box_size = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as u64;
+            let box_size = u64::from(u32::from_be_bytes([
+                buffer[0], buffer[1], buffer[2], buffer[3],
+            ]));
             // Copy box_type to avoid borrow conflict with later mutable borrow
             let box_type: [u8; 4] = [buffer[4], buffer[5], buffer[6], buffer[7]];
 
@@ -535,9 +551,12 @@ impl MetadataInspector {
 
         for i in 0..(buffer.len().saturating_sub(8)) {
             if &buffer[i + 4..i + 8] == b"moov" {
-                let box_size =
-                    u32::from_be_bytes([buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]])
-                        as u64;
+                let box_size = u64::from(u32::from_be_bytes([
+                    buffer[i],
+                    buffer[i + 1],
+                    buffer[i + 2],
+                    buffer[i + 3],
+                ]));
                 let global_pos = start_pos + i as u64;
                 info!(
                     "MetadataInspector: Found 'moov' at end: {} size {}",
@@ -590,7 +609,7 @@ impl MetadataInspector {
         let mut samples_per_chunk = Vec::new();
 
         // Find stss (sync sample table) - contains keyframe sample numbers
-        if let Some(stss_pos) = Self::find_atom(moov_data, b"stss") {
+        if let Some(stss_pos) = Self::find_atom(moov_data, *b"stss") {
             keyframe_indices = Self::parse_stss(&moov_data[stss_pos..]);
             debug!(
                 "MetadataInspector: Found {} keyframe indices in stss",
@@ -599,14 +618,14 @@ impl MetadataInspector {
         }
 
         // Find stco or co64 (chunk offset table)
-        if let Some(stco_pos) = Self::find_atom(moov_data, b"stco") {
-            chunk_offsets = Self::parse_stco(&moov_data[stco_pos..], false);
-        } else if let Some(co64_pos) = Self::find_atom(moov_data, b"co64") {
-            chunk_offsets = Self::parse_stco(&moov_data[co64_pos..], true);
+        if let Some(stco_pos) = Self::find_atom(moov_data, *b"stco") {
+            chunk_offsets = Self::parse_stco(&moov_data[stco_pos..], ChunkOffsetFormat::Stco32);
+        } else if let Some(co64_pos) = Self::find_atom(moov_data, *b"co64") {
+            chunk_offsets = Self::parse_stco(&moov_data[co64_pos..], ChunkOffsetFormat::Co64);
         }
 
         // Find stsc (sample-to-chunk table)
-        if let Some(stsc_pos) = Self::find_atom(moov_data, b"stsc") {
+        if let Some(stsc_pos) = Self::find_atom(moov_data, *b"stsc") {
             samples_per_chunk = Self::parse_stsc(&moov_data[stsc_pos..]);
         }
 
@@ -637,9 +656,9 @@ impl MetadataInspector {
         chunk_offsets.into_iter().take(10).collect()
     }
 
-    fn find_atom(data: &[u8], atom_type: &[u8; 4]) -> Option<usize> {
+    fn find_atom(data: &[u8], atom_type: [u8; 4]) -> Option<usize> {
         for i in 0..data.len().saturating_sub(8) {
-            if &data[i + 4..i + 8] == atom_type {
+            if data[i + 4..i + 8] == atom_type {
                 return Some(i);
             }
         }
@@ -673,13 +692,16 @@ impl MetadataInspector {
         indices
     }
 
-    fn parse_stco(data: &[u8], is_64bit: bool) -> Vec<u64> {
+    fn parse_stco(data: &[u8], format: ChunkOffsetFormat) -> Vec<u64> {
         if data.len() < 16 {
             return Vec::new();
         }
 
         let entry_count = u32::from_be_bytes([data[12], data[13], data[14], data[15]]) as usize;
-        let entry_size = if is_64bit { 8 } else { 4 };
+        let entry_size = match format {
+            ChunkOffsetFormat::Co64 => 8,
+            ChunkOffsetFormat::Stco32 => 4,
+        };
         let mut offsets = Vec::with_capacity(entry_count.min(1000));
 
         let entries_start = 16;
@@ -689,8 +711,8 @@ impl MetadataInspector {
                 break;
             }
 
-            let chunk_offset = if is_64bit {
-                u64::from_be_bytes([
+            let chunk_offset = match format {
+                ChunkOffsetFormat::Co64 => u64::from_be_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
@@ -699,14 +721,13 @@ impl MetadataInspector {
                     data[offset + 5],
                     data[offset + 6],
                     data[offset + 7],
-                ])
-            } else {
-                u32::from_be_bytes([
+                ]),
+                ChunkOffsetFormat::Stco32 => u64::from(u32::from_be_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
                     data[offset + 3],
-                ]) as u64
+                ])),
             };
 
             offsets.push(chunk_offset);

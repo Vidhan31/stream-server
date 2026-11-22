@@ -8,14 +8,14 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::Path};
 use tokio::io::AsyncWriteExt;
 
-pub const SERVER_WINDOWS_ASSET_NAME: &str = "stream-server-windows-amd64.exe";
-pub const STREMIO_RUNTIME_WINDOWS_ASSET_NAME: &str = "stremio-runtime-windows-amd64.exe";
-pub const UPDATER_WINDOWS_ASSET_NAME: &str = "stream-server-updater-windows-amd64.exe";
-pub const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
+pub(crate) const SERVER_WINDOWS_ASSET_NAME: &str = "stream-server-windows-amd64.exe";
+pub(crate) const STREMIO_RUNTIME_WINDOWS_ASSET_NAME: &str = "stremio-runtime-windows-amd64.exe";
+pub(crate) const UPDATER_WINDOWS_ASSET_NAME: &str = "stream-server-updater-windows-amd64.exe";
+pub(crate) const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReleaseAssetInfo {
+pub(crate) struct ReleaseAssetInfo {
     pub name: String,
     pub download_url: String,
     pub size: u64,
@@ -33,7 +33,7 @@ impl From<&GitHubAsset> for ReleaseAssetInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RequiredAssets {
+pub(crate) struct RequiredAssets {
     pub server: ReleaseAssetInfo,
     pub runtime: ReleaseAssetInfo,
     pub updater: ReleaseAssetInfo,
@@ -41,7 +41,9 @@ pub struct RequiredAssets {
     pub msi: Option<ReleaseAssetInfo>,
 }
 
-pub fn select_required_assets(assets: &[GitHubAsset]) -> Result<RequiredAssets, UpdateError> {
+pub(crate) fn select_required_assets(
+    assets: &[GitHubAsset],
+) -> Result<RequiredAssets, UpdateError> {
     let server = find_asset(assets, SERVER_WINDOWS_ASSET_NAME)?;
     let runtime = find_asset(assets, STREMIO_RUNTIME_WINDOWS_ASSET_NAME)?;
     let updater = find_asset(assets, UPDATER_WINDOWS_ASSET_NAME)?;
@@ -70,7 +72,7 @@ fn find_asset(assets: &[GitHubAsset], name: &str) -> Result<ReleaseAssetInfo, Up
         })
 }
 
-pub fn parse_sha256sums(text: &str) -> HashMap<String, String> {
+pub(crate) fn parse_sha256sums(text: &str) -> HashMap<String, String> {
     let mut checksums = HashMap::new();
     for line in text.lines() {
         let line = line.trim();
@@ -103,7 +105,7 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub async fn fetch_checksum_text(
+pub(crate) async fn fetch_checksum_text(
     client: &reqwest::Client,
     asset: &ReleaseAssetInfo,
 ) -> Result<String, UpdateError> {
@@ -117,7 +119,7 @@ pub async fn fetch_checksum_text(
     Ok(text)
 }
 
-pub async fn download_asset(
+pub(crate) async fn download_asset(
     client: &reqwest::Client,
     asset: &ReleaseAssetInfo,
     dest: &Path,
@@ -142,13 +144,13 @@ pub async fn download_asset(
     Ok(())
 }
 
-pub async fn sha256_file(path: &Path) -> Result<String, UpdateError> {
+pub(crate) async fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     let data = tokio::fs::read(path).await?;
     let digest = Sha256::digest(&data);
     Ok(hex::encode(digest))
 }
 
-pub async fn verify_file_checksum(
+pub(crate) async fn verify_file_checksum(
     asset: &ReleaseAssetInfo,
     path: &Path,
     checksums: &HashMap<String, String>,

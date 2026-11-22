@@ -9,9 +9,9 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 pub mod backend;
-pub mod cache;
 pub mod disk_cache;
 pub mod engine;
+pub mod error;
 pub mod files;
 pub mod hls;
 pub mod hwaccel;
@@ -23,7 +23,8 @@ pub mod subtitles;
 pub mod tracker_prober;
 pub mod trackers;
 
-// Re-export TrackerStorage for use by server crate
+// Re-export TrackerStorage and errors for use by server crate
+pub use error::{EngineError, Result as EngineResult};
 pub use trackers::TrackerStorage;
 
 #[cfg(feature = "libtorrent")]
@@ -74,38 +75,48 @@ pub struct BackendEngineFS<B: TorrentBackend> {
     tracker_manager: Arc<crate::trackers::TrackerManager>,
     pub cache_dir: std::path::PathBuf,
     pub download_dir: std::path::PathBuf,
-    /// Track active streams per info_hash for legacy compatibility
-    active_streams: Arc<RwLock<HashMap<String, usize>>>,
-    /// Track active requests per specific streamed file so cleanup does not race probe retries.
-    active_file_streams: Arc<RwLock<HashMap<(String, usize), usize>>>,
-    /// Tracks the most recently active streamed file for legacy diagnostics.
-    /// Active scheduling is driven by active_file_streams so several torrents can stream at once.
-    active_file: Arc<RwLock<Option<(String, usize)>>>,
-    /// HLS playback is made of short segment reads. A lease keeps the file wanted
-    /// while the player is buffered and no response body is currently open.
-    active_playback_leases: Arc<RwLock<HashMap<(String, usize), PlaybackLease>>>,
-    /// For multi-file torrents, only the latest requested file is allowed to be
-    /// wanted at a time. Single-file torrents bypass this selector.
-    active_multifile_files: Arc<RwLock<HashMap<String, MultiFileActiveSelection>>>,
+    pub stream_state: Arc<RwLock<StreamState>>,
     priority_generation: Arc<AtomicU64>,
     /// Optional disk cache for persisting completed files
-    disk_cache: Option<Arc<disk_cache::DiskCacheManager>>,
+    _disk_cache: Option<Arc<disk_cache::DiskCacheManager>>,
     /// When false, torrents are paused once their download completes.
     seeding_enabled: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Clone)]
-struct PlaybackLease {
-    last_seen_secs: u64,
-    expires_at_secs: u64,
+#[derive(Debug, Clone, Default)]
+pub struct StreamState {
+    /// Track active streams per info_hash for legacy compatibility
+    pub active_streams: HashMap<String, usize>,
+    /// Track active requests per specific streamed file so cleanup does not race probe retries.
+    pub active_file_streams: HashMap<(String, usize), usize>,
+    /// Tracks the most recently active streamed file for legacy diagnostics.
+    pub active_file: Option<(String, usize)>,
+    /// HLS playback is made of short segment reads. A lease keeps the file wanted
+    /// while the player is buffered and no response body is currently open.
+    pub active_playback_leases: HashMap<(String, usize), PlaybackLease>,
+    /// For multi-file torrents, only the latest requested file is allowed to be
+    /// wanted at a time. Single-file torrents bypass this selector.
+    pub active_multifile_files: HashMap<String, MultiFileActiveSelection>,
 }
 
 #[derive(Debug, Clone)]
-struct MultiFileActiveSelection {
-    file_idx: usize,
-    generation: u64,
-    source: &'static str,
-    last_seen_secs: u64,
+pub struct PlaybackLease {
+    pub last_seen_secs: u64,
+    pub expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiFileActiveSelection {
+    pub file_idx: usize,
+    pub generation: u64,
+    pub source: &'static str,
+    pub last_seen_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackMode {
+    Streaming,
+    KeepDownloading,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -197,28 +208,20 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
 
         let efs = Self {
             backend: Arc::new(backend),
-            engines: engines.clone(),
+            engines: Arc::clone(&engines),
             tracker_manager,
             cache_dir,
-            download_dir: download_dir.clone(),
-            active_streams: Arc::new(RwLock::new(HashMap::new())),
-            active_file_streams: Arc::new(RwLock::new(HashMap::new())),
-            active_file: Arc::new(RwLock::new(None)),
-            active_playback_leases: Arc::new(RwLock::new(HashMap::new())),
-            active_multifile_files: Arc::new(RwLock::new(HashMap::new())),
+            download_dir,
+            stream_state: Arc::new(RwLock::new(StreamState::default())),
             priority_generation: Arc::new(AtomicU64::new(0)),
-            disk_cache: None,
+            _disk_cache: None,
             seeding_enabled: Arc::new(AtomicBool::new(true)),
         };
 
-        let engines_clone = engines.clone();
-        let backend_clone = efs.backend.clone();
-        let active_streams_clone = efs.active_streams.clone();
-        let active_file_streams_clone = efs.active_file_streams.clone();
-        let active_file_clone = efs.active_file.clone();
-        let active_playback_leases_clone = efs.active_playback_leases.clone();
-        let active_multifile_files_clone = efs.active_multifile_files.clone();
-        let seeding_flag = efs.seeding_enabled.clone();
+        let engines_clone = engines;
+        let backend_clone = Arc::clone(&efs.backend);
+        let stream_state_clone = Arc::clone(&efs.stream_state);
+        let seeding_flag = Arc::clone(&efs.seeding_enabled);
         tokio::spawn(async move {
             loop {
                 // Run fairly frequently so seeding stops promptly after the
@@ -230,14 +233,15 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 let now = now_secs();
 
                 let expired_leases = {
-                    let mut leases = active_playback_leases_clone.write().await;
-                    let expired = leases
+                    let mut state = stream_state_clone.write().await;
+                    let expired = state
+                        .active_playback_leases
                         .iter()
                         .filter(|(_, lease)| !playback_lease_is_active(lease, now))
                         .map(|(key, _)| key.clone())
                         .collect::<Vec<_>>();
                     for key in &expired {
-                        leases.remove(key);
+                        state.active_playback_leases.remove(key);
                     }
                     expired
                 };
@@ -249,47 +253,45 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                         "HLS playback lease expired"
                     );
 
-                    let still_active = {
-                        let streams = active_file_streams_clone.read().await;
-                        streams
+                    let (still_active, active_selection) = {
+                        let mut state = stream_state_clone.write().await;
+                        let active = state
+                            .active_file_streams
                             .get(&(info_hash.clone(), file_idx))
                             .copied()
                             .unwrap_or(0)
-                            > 0
+                            > 0;
+                        if active {
+                            (true, None)
+                        } else {
+                            let sel = match state.active_multifile_files.get(&info_hash).cloned() {
+                                Some(selection) if selection.file_idx == file_idx => {
+                                    state.active_multifile_files.remove(&info_hash);
+                                    tracing::info!(
+                                        info_hash = %info_hash,
+                                        file_idx,
+                                        generation = selection.generation,
+                                        reason = "hls-lease-expired",
+                                        "multifile_active_file_cleared"
+                                    );
+                                    None
+                                }
+                                Some(selection) => Some(selection),
+                                None => None,
+                            };
+                            if let Some((ref h, idx)) = state.active_file
+                                && h == &info_hash
+                                && idx == file_idx
+                            {
+                                state.active_file = sel
+                                    .as_ref()
+                                    .map(|selection| (info_hash.clone(), selection.file_idx));
+                            }
+                            (false, sel)
+                        }
                     };
                     if still_active {
                         continue;
-                    }
-
-                    let active_selection = {
-                        let mut selections = active_multifile_files_clone.write().await;
-                        match selections.get(&info_hash).cloned() {
-                            Some(selection) if selection.file_idx == file_idx => {
-                                selections.remove(&info_hash);
-                                tracing::info!(
-                                    info_hash = %info_hash,
-                                    file_idx,
-                                    generation = selection.generation,
-                                    reason = "hls-lease-expired",
-                                    "multifile_active_file_cleared"
-                                );
-                                None
-                            }
-                            Some(selection) => Some(selection),
-                            None => None,
-                        }
-                    };
-
-                    {
-                        let mut active = active_file_clone.write().await;
-                        if let Some((ref h, idx)) = *active
-                            && h == &info_hash
-                            && idx == file_idx
-                        {
-                            *active = active_selection
-                                .as_ref()
-                                .map(|selection| (info_hash.clone(), selection.file_idx));
-                        }
                     }
 
                     let engine = {
@@ -305,15 +307,14 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                             continue;
                         }
                         let reconciled = Self::reconcile_multifile_engine(
-                            engine.clone(),
+                            Arc::clone(&engine),
                             active_selection
                                 .as_ref()
                                 .map(|selection| selection.file_idx),
                             None,
                             active_selection
                                 .as_ref()
-                                .map(|selection| selection.generation)
-                                .unwrap_or(0),
+                                .map_or(0, |selection| selection.generation),
                             "hls-lease-expired",
                         )
                         .await;
@@ -352,37 +353,34 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                             continue;
                         }
 
-                        let active_stream_count = {
-                            let streams = active_streams_clone.read().await;
-                            streams.get(hash).copied().unwrap_or(0)
-                        };
-                        let active_file_stream_count = {
-                            let streams = active_file_streams_clone.read().await;
-                            streams
+                        let (
+                            active_stream_count,
+                            active_file_stream_count,
+                            active_playback_lease_count,
+                            active_file_matches,
+                            active_multifile_matches,
+                        ) = {
+                            let state = stream_state_clone.read().await;
+                            let s_count = state.active_streams.get(hash).copied().unwrap_or(0);
+                            let fs_count = state
+                                .active_file_streams
                                 .iter()
                                 .filter(|((stream_hash, _), _)| stream_hash == hash)
                                 .map(|(_, count)| *count)
-                                .sum::<usize>()
-                        };
-                        let active_playback_lease_count = {
-                            let leases = active_playback_leases_clone.read().await;
-                            leases
+                                .sum::<usize>();
+                            let pl_count = state
+                                .active_playback_leases
                                 .iter()
                                 .filter(|((stream_hash, _), lease)| {
                                     stream_hash == hash && playback_lease_is_active(lease, now)
                                 })
-                                .count()
-                        };
-                        let active_file_matches = {
-                            let active = active_file_clone.read().await;
-                            active
+                                .count();
+                            let f_matches = state
+                                .active_file
                                 .as_ref()
-                                .map(|(stream_hash, _)| stream_hash == hash)
-                                .unwrap_or(false)
-                        };
-                        let active_multifile_matches = {
-                            let selections = active_multifile_files_clone.read().await;
-                            selections.contains_key(hash)
+                                .is_some_and(|(stream_hash, _)| stream_hash == hash);
+                            let mf_matches = state.active_multifile_files.contains_key(hash);
+                            (s_count, fs_count, pl_count, f_matches, mf_matches)
                         };
 
                         let skip_reason = if engine_active_streams > 0 {
@@ -467,25 +465,20 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                         if engine.handle.manages_playback_lifecycle() {
                             continue;
                         }
-                        let hash_active = {
-                            let streams = active_streams_clone.read().await;
-                            streams.get(hash).copied().unwrap_or(0) > 0
-                        };
-                        let file_active = {
-                            let streams = active_file_streams_clone.read().await;
-                            streams
+                        let (hash_active, file_active, playback_active, multifile_active) = {
+                            let state = stream_state_clone.read().await;
+                            let h_active = state.active_streams.get(hash).copied().unwrap_or(0) > 0;
+                            let f_active = state
+                                .active_file_streams
                                 .iter()
-                                .any(|((stream_hash, _), count)| stream_hash == hash && *count > 0)
-                        };
-                        let playback_active = {
-                            let leases = active_playback_leases_clone.read().await;
-                            leases.iter().any(|((stream_hash, _), lease)| {
-                                stream_hash == hash && playback_lease_is_active(lease, now)
-                            })
-                        };
-                        let multifile_active = {
-                            let selections = active_multifile_files_clone.read().await;
-                            selections.contains_key(hash)
+                                .any(|((stream_hash, _), count)| stream_hash == hash && *count > 0);
+                            let p_active = state.active_playback_leases.iter().any(
+                                |((stream_hash, _), lease)| {
+                                    stream_hash == hash && playback_lease_is_active(lease, now)
+                                },
+                            );
+                            let m_active = state.active_multifile_files.contains_key(hash);
+                            (h_active, f_active, p_active, m_active)
                         };
                         let reader_active = engine.active_streams.load(Ordering::SeqCst) > 0;
                         if hash_active
@@ -534,7 +527,10 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         extra_trackers: Option<Vec<String>>,
     ) -> Result<Arc<Engine<B::Handle>>> {
         // Start with default trackers
-        let mut trackers: Vec<String> = DEFAULT_TRACKERS.iter().map(|s| s.to_string()).collect();
+        let mut trackers: Vec<String> = DEFAULT_TRACKERS
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         // Add cached trackers from tracker manager (already ranked by RTT)
         let cached_trackers = self.tracker_manager.get_trackers().await;
@@ -555,11 +551,11 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         let mut engines = self.engines.write().await;
         if let Some(engine) = engines.get(&info_hash) {
             engine.touch();
-            return Ok(engine.clone());
+            return Ok(Arc::clone(engine));
         }
 
         let engine = Arc::new(Engine::new_with_handle(handle, &info_hash));
-        engines.insert(info_hash.clone(), engine.clone());
+        engines.insert(info_hash.clone(), Arc::clone(&engine));
         Ok(engine)
     }
 
@@ -576,7 +572,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         if let Some(engine) = self.get_engine(info_hash).await {
             return Ok(engine);
         }
-        let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
         self.add_torrent(TorrentSource::Url(magnet), None).await
     }
 
@@ -617,11 +613,11 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             .collect();
         drop(engines);
 
-        let active_streams = self.active_streams.read().await.clone();
-        let active_file_streams = self
+        let now = now_secs();
+        let state = self.stream_state.read().await;
+        let active_streams = state.active_streams.clone();
+        let active_file_streams = state
             .active_file_streams
-            .read()
-            .await
             .iter()
             .map(|((info_hash, file_idx), count)| ActiveFileStreamSnapshot {
                 info_hash: info_hash.clone(),
@@ -629,20 +625,16 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 count: *count,
             })
             .collect();
-        let active_file = self
-            .active_file
-            .read()
-            .await
-            .as_ref()
-            .map(|(info_hash, file_idx)| ActiveFileSnapshot {
-                info_hash: info_hash.clone(),
-                file_idx: *file_idx,
-            });
-        let now = now_secs();
-        let active_playback_leases = self
+        let active_file =
+            state
+                .active_file
+                .as_ref()
+                .map(|(info_hash, file_idx)| ActiveFileSnapshot {
+                    info_hash: info_hash.clone(),
+                    file_idx: *file_idx,
+                });
+        let active_playback_leases = state
             .active_playback_leases
-            .read()
-            .await
             .iter()
             .filter(|(_, lease)| playback_lease_is_active(lease, now))
             .map(
@@ -654,10 +646,8 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 },
             )
             .collect();
-        let active_multifile_selections = self
+        let active_multifile_selections = state
             .active_multifile_files
-            .read()
-            .await
             .iter()
             .map(|(info_hash, selection)| MultiFileActiveSelectionSnapshot {
                 info_hash: info_hash.clone(),
@@ -667,6 +657,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 last_seen_secs: selection.last_seen_secs,
             })
             .collect();
+        drop(state);
 
         StreamActivitySnapshot {
             uptime_secs: now,
@@ -705,22 +696,20 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             if let Some(engine) = self.get_engine(&info_hash).await {
                 engine.touch();
             }
-            *self.active_file.write().await = Some((info_hash.clone(), file_idx));
+            self.stream_state.write().await.active_file = Some((info_hash.clone(), file_idx));
         } else {
-            self.activate_file(&info_hash, file_idx, false, "stream")
+            self.activate_file(&info_hash, file_idx, PlaybackMode::Streaming, "stream")
                 .await;
         }
 
         // Also update legacy active_streams counter
         {
-            let mut streams = self.active_streams.write().await;
-            let count = streams.entry(info_hash.clone()).or_insert(0);
-            *count += 1;
-        }
-        {
-            let mut streams = self.active_file_streams.write().await;
-            let count = streams.entry((info_hash.clone(), file_idx)).or_insert(0);
-            *count += 1;
+            let mut state = self.stream_state.write().await;
+            *state.active_streams.entry(info_hash.clone()).or_insert(0) += 1;
+            *state
+                .active_file_streams
+                .entry((info_hash.clone(), file_idx))
+                .or_insert(0) += 1;
         }
 
         tracing::debug!(
@@ -734,14 +723,15 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         &self,
         info_hash: &str,
         file_idx: usize,
-        keep_file_downloading: bool,
+        mode: PlaybackMode,
         source: &'static str,
     ) {
         let mut is_multifile = false;
         if let Some(engine) = self.get_engine(info_hash).await {
             engine.touch();
             if engine.handle.manages_playback_lifecycle() {
-                *self.active_file.write().await = Some((info_hash.to_string(), file_idx));
+                self.stream_state.write().await.active_file =
+                    Some((info_hash.to_string(), file_idx));
                 return;
             }
             is_multifile = engine.handle.file_count().await > 1;
@@ -765,7 +755,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 );
             }
 
-            if keep_file_downloading
+            if mode == PlaybackMode::KeepDownloading
                 && !is_multifile
                 && let Err(err) = engine.handle.keep_file_downloading(file_idx).await
             {
@@ -779,10 +769,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             }
         }
 
-        {
-            let mut active = self.active_file.write().await;
-            *active = Some((info_hash.to_string(), file_idx));
-        }
+        self.stream_state.write().await.active_file = Some((info_hash.to_string(), file_idx));
 
         if is_multifile {
             self.activate_multifile_file(info_hash, file_idx, None, source)
@@ -827,8 +814,9 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         let generation = self.priority_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let now = now_secs();
         let previous_file_idx = {
-            let mut selections = self.active_multifile_files.write().await;
-            selections
+            let mut state = self.stream_state.write().await;
+            let prev = state
+                .active_multifile_files
                 .insert(
                     info_hash.to_string(),
                     MultiFileActiveSelection {
@@ -838,21 +826,17 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                         last_seen_secs: now,
                     },
                 )
-                .map(|selection| selection.file_idx)
-        };
+                .map(|selection| selection.file_idx);
 
-        {
-            let mut leases = self.active_playback_leases.write().await;
-            leases.retain(|(hash, idx), _| hash.as_str() != info_hash || *idx == file_idx);
-        }
-        {
-            let mut streams = self.active_file_streams.write().await;
-            streams.retain(|(hash, idx), _| hash.as_str() != info_hash || *idx == file_idx);
-        }
-        {
-            let mut active = self.active_file.write().await;
-            *active = Some((info_hash.to_string(), file_idx));
-        }
+            state
+                .active_playback_leases
+                .retain(|(hash, idx), _| hash.as_str() != info_hash || *idx == file_idx);
+            state
+                .active_file_streams
+                .retain(|(hash, idx), _| hash.as_str() != info_hash || *idx == file_idx);
+            state.active_file = Some((info_hash.to_string(), file_idx));
+            prev
+        };
 
         engine.touch();
         if let Err(err) = engine.handle.resume_torrent().await {
@@ -937,8 +921,8 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             HLS_PLAYBACK_LEASE_TTL
         };
         {
-            let mut leases = self.active_playback_leases.write().await;
-            leases.insert(
+            let mut state = self.stream_state.write().await;
+            state.active_playback_leases.insert(
                 (info_hash.clone(), file_idx),
                 PlaybackLease {
                     last_seen_secs: now,
@@ -950,7 +934,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         if let Some(engine) = engine {
             engine.touch();
             if native_lifecycle {
-                *self.active_file.write().await = Some((info_hash.clone(), file_idx));
+                self.stream_state.write().await.active_file = Some((info_hash.clone(), file_idx));
                 if let Err(error) = engine.handle.refresh_hls_activity(file_idx, source).await {
                     tracing::warn!(
                         info_hash = %info_hash,
@@ -961,7 +945,8 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                     );
                 }
             } else {
-                self.activate_file(&info_hash, file_idx, true, source).await;
+                self.activate_file(&info_hash, file_idx, PlaybackMode::KeepDownloading, source)
+                    .await;
             }
         }
 
@@ -994,16 +979,16 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             HLS_PLAYBACK_LEASE_TTL
         };
         let refreshed = {
-            let mut leases = self.active_playback_leases.write().await;
+            let mut state = self.stream_state.write().await;
             let key = (info_hash.clone(), file_idx);
-            match leases.get_mut(&key) {
+            match state.active_playback_leases.get_mut(&key) {
                 Some(lease) if playback_lease_is_active(lease, now) => {
                     lease.last_seen_secs = now;
                     lease.expires_at_secs = now.saturating_add(ttl.as_secs());
                     true
                 }
                 Some(_) => {
-                    leases.remove(&key);
+                    state.active_playback_leases.remove(&key);
                     false
                 }
                 None => false,
@@ -1024,7 +1009,8 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                         );
                     }
                 } else {
-                    self.activate_file(&info_hash, file_idx, true, source).await;
+                    self.activate_file(&info_hash, file_idx, PlaybackMode::KeepDownloading, source)
+                        .await;
                 }
             }
             tracing::debug!(
@@ -1043,8 +1029,11 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
     pub async fn end_hls_playback(&self, info_hash: &str, file_idx: usize, reason: &'static str) {
         let info_hash = info_hash.to_lowercase();
         let removed = {
-            let mut leases = self.active_playback_leases.write().await;
-            leases.remove(&(info_hash.clone(), file_idx)).is_some()
+            let mut state = self.stream_state.write().await;
+            state
+                .active_playback_leases
+                .remove(&(info_hash.clone(), file_idx))
+                .is_some()
         };
 
         let engine = self.get_engine(&info_hash).await;
@@ -1083,35 +1072,35 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
     pub async fn on_stream_end(&self, info_hash: &str, file_idx: usize) {
         let info_hash = info_hash.to_lowercase();
 
-        let hash_streams_remaining = {
-            let mut streams = self.active_streams.write().await;
-            if let Some(count) = streams.get_mut(&info_hash) {
+        let (hash_streams_remaining, file_streams_remaining, remaining) = {
+            let mut state = self.stream_state.write().await;
+            let h_rem = if let Some(count) = state.active_streams.get_mut(&info_hash) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    streams.remove(&info_hash);
+                    state.active_streams.remove(&info_hash);
                     0
                 } else {
                     *count
                 }
             } else {
                 0
-            }
-        };
+            };
 
-        let file_streams_remaining = {
-            let mut streams = self.active_file_streams.write().await;
             let key = (info_hash.clone(), file_idx);
-            if let Some(count) = streams.get_mut(&key) {
+            let f_rem = if let Some(count) = state.active_file_streams.get_mut(&key) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    streams.remove(&key);
+                    state.active_file_streams.remove(&key);
                     0
                 } else {
                     *count
                 }
             } else {
                 0
-            }
+            };
+
+            let total = state.active_streams.values().sum::<usize>();
+            (h_rem, f_rem, total)
         };
 
         let native_lifecycle = if let Some(engine) = self.get_engine(&info_hash).await {
@@ -1132,7 +1121,6 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 .await;
         }
 
-        let remaining = self.active_streams.read().await.values().sum::<usize>();
         tracing::debug!(
             "Stream ended for {} file_idx={}, total active streams: {}, file streams remaining: {}",
             info_hash,
@@ -1155,12 +1143,9 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         info_hash: String,
         delay: Duration,
     ) -> tokio::task::JoinHandle<()> {
-        let engines = self.engines.clone();
-        let active_streams = self.active_streams.clone();
-        let active_file_streams = self.active_file_streams.clone();
-        let active_playback_leases = self.active_playback_leases.clone();
-        let active_multifile_files = self.active_multifile_files.clone();
-        let seeding_enabled = self.seeding_enabled.clone();
+        let engines = Arc::clone(&self.engines);
+        let stream_state = Arc::clone(&self.stream_state);
+        let seeding_enabled = Arc::clone(&self.seeding_enabled);
 
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
@@ -1169,26 +1154,22 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                 return;
             }
 
-            let hash_active = {
-                let streams = active_streams.read().await;
-                streams.get(&info_hash).copied().unwrap_or(0) > 0
-            };
-            let file_active = {
-                let streams = active_file_streams.read().await;
-                streams
-                    .iter()
-                    .any(|((hash, _), count)| hash == &info_hash && *count > 0)
-            };
-            let playback_active = {
+            let (hash_active, file_active, playback_active, multifile_active) = {
                 let now = now_secs();
-                let leases = active_playback_leases.read().await;
-                leases.iter().any(|((hash, _), lease)| {
-                    hash == &info_hash && playback_lease_is_active(lease, now)
-                })
-            };
-            let multifile_active = {
-                let selections = active_multifile_files.read().await;
-                selections.contains_key(&info_hash)
+                let state = stream_state.read().await;
+                let h_active = state.active_streams.get(&info_hash).copied().unwrap_or(0) > 0;
+                let f_active = state
+                    .active_file_streams
+                    .iter()
+                    .any(|((hash, _), count)| hash == &info_hash && *count > 0);
+                let p_active = state
+                    .active_playback_leases
+                    .iter()
+                    .any(|((hash, _), lease)| {
+                        hash == &info_hash && playback_lease_is_active(lease, now)
+                    });
+                let m_active = state.active_multifile_files.contains_key(&info_hash);
+                (h_active, f_active, p_active, m_active)
             };
             if hash_active || file_active || playback_active || multifile_active {
                 tracing::debug!(
@@ -1263,14 +1244,12 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
         {
             return None;
         }
-        let engines = self.engines.clone();
-        let active_file = self.active_file.clone();
-        let active_file_streams = self.active_file_streams.clone();
-        let active_playback_leases = self.active_playback_leases.clone();
-        let active_multifile_files = self.active_multifile_files.clone();
+        let engines = Arc::clone(&self.engines);
+        let stream_state = Arc::clone(&self.stream_state);
         let scheduled_generation = {
-            let selections = self.active_multifile_files.read().await;
-            selections
+            let state = self.stream_state.read().await;
+            state
+                .active_multifile_files
                 .get(&info_hash)
                 .filter(|selection| selection.file_idx == file_idx)
                 .map(|selection| selection.generation)
@@ -1280,41 +1259,35 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             tokio::time::sleep(delay).await;
 
             let key = (info_hash.clone(), file_idx);
-            let still_active = {
-                let streams = active_file_streams.read().await;
-                streams.get(&key).copied().unwrap_or(0) > 0
-            };
-            if still_active {
-                tracing::debug!(
-                    "Skipping delayed cleanup for {} idx={} because a new stream started",
-                    info_hash,
-                    file_idx
-                );
-                return;
-            }
-            let playback_active = {
-                let now = now_secs();
-                let leases = active_playback_leases.read().await;
-                leases
-                    .get(&key)
-                    .map(|lease| playback_lease_is_active(lease, now))
-                    .unwrap_or(false)
-            };
-            if playback_active {
-                tracing::info!(
-                    info_hash = %info_hash,
-                    file_idx,
-                    "Skipping delayed cleanup because HLS playback lease is active"
-                );
-                return;
-            }
-
             let active_selection = {
-                let mut selections = active_multifile_files.write().await;
-                match selections.get(&info_hash).cloned() {
+                let now = now_secs();
+                let mut state = stream_state.write().await;
+                let still_active = state.active_file_streams.get(&key).copied().unwrap_or(0) > 0;
+                if still_active {
+                    tracing::debug!(
+                        "Skipping delayed cleanup for {} idx={} because a new stream started",
+                        info_hash,
+                        file_idx
+                    );
+                    return;
+                }
+                let playback_active = state
+                    .active_playback_leases
+                    .get(&key)
+                    .is_some_and(|lease| playback_lease_is_active(lease, now));
+                if playback_active {
+                    tracing::info!(
+                        info_hash = %info_hash,
+                        file_idx,
+                        "Skipping delayed cleanup because HLS playback lease is active"
+                    );
+                    return;
+                }
+
+                let sel = match state.active_multifile_files.get(&info_hash).cloned() {
                     Some(selection) if selection.file_idx == file_idx => {
                         if scheduled_generation == Some(selection.generation) {
-                            selections.remove(&info_hash);
+                            state.active_multifile_files.remove(&info_hash);
                             tracing::info!(
                                 info_hash = %info_hash,
                                 file_idx,
@@ -1336,12 +1309,9 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                     }
                     Some(selection) => Some(selection),
                     None => None,
-                }
-            };
+                };
 
-            {
-                let mut active = active_file.write().await;
-                if let Some((ref h, idx)) = *active
+                if let Some((ref h, idx)) = state.active_file
                     && h == &info_hash
                     && idx == file_idx
                 {
@@ -1350,11 +1320,13 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
                         info_hash,
                         file_idx
                     );
-                    *active = active_selection
+                    state.active_file = sel
                         .as_ref()
                         .map(|selection| (info_hash.clone(), selection.file_idx));
                 }
-            }
+
+                sel
+            };
 
             let engine = {
                 let engines = engines.read().await;
@@ -1362,7 +1334,7 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             };
             if let Some(engine) = engine {
                 let reconciled = Self::reconcile_multifile_engine(
-                    engine.clone(),
+                    Arc::clone(&engine),
                     active_selection
                         .as_ref()
                         .map(|selection| selection.file_idx),
@@ -1418,6 +1390,11 @@ impl BackendEngineFS<LibtorrentBackend> {
         Self::new_with_storage(root_dir, config, None).await
     }
 
+    #[allow(
+        clippy::unused_async,
+        clippy::used_underscore_binding,
+        clippy::unused_async_trait_impl
+    )]
     pub async fn new_with_storage(
         root_dir: std::path::PathBuf,
         config: crate::backend::BackendConfig,
@@ -1437,7 +1414,7 @@ impl BackendEngineFS<LibtorrentBackend> {
 
         // Set up disk cache for conditional file persistence
         let disk_cache_dir = root_dir.join("disk-cache");
-        efs.disk_cache = Some(Arc::new(disk_cache::DiskCacheManager::new(
+        efs._disk_cache = Some(Arc::new(disk_cache::DiskCacheManager::new(
             disk_cache_dir,
             cache_size,
         )));
@@ -1445,6 +1422,7 @@ impl BackendEngineFS<LibtorrentBackend> {
         Ok(efs)
     }
 
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn new_disk_backed(
         root_dir: std::path::PathBuf,
         config: crate::backend::BackendConfig,
@@ -1478,16 +1456,18 @@ impl BackendEngineFS<LibtorrentBackend> {
         self.backend.update_session_settings(profile, privacy).await;
     }
 
-    pub fn set_seeding_enabled(&self, enabled: bool) {
+    pub fn set_seeding_enabled(&self, policy: impl Into<crate::backend::SeedingPolicy>) {
+        let policy = policy.into();
+        let enabled = policy.is_enabled();
         self.seeding_enabled.store(enabled, Ordering::Relaxed);
-        self.backend.set_seeding_enabled(enabled);
+        self.backend.set_seeding_enabled(policy);
         tracing::info!(seeding_enabled = enabled, "Seeding policy updated");
 
         // When seeding is turned back on, resume torrents the seeding-disabled
         // policy had paused so they can seed again. Turning seeding off is
         // handled lazily by the periodic loop / schedule_torrent_pause.
         if enabled {
-            let engines = self.engines.clone();
+            let engines = Arc::clone(&self.engines);
             tokio::spawn(async move {
                 let read = engines.read().await;
                 for engine in read.values() {
@@ -1548,6 +1528,7 @@ impl BackendEngineFS<LibtorrentBackend> {
     }
 
     /// Enable or disable streaming mode (limits uploads during streaming)
+    #[allow(clippy::fn_params_excessive_bools)]
     pub async fn set_streaming_mode(&self, enabled: bool) {
         self.backend.set_streaming_mode(enabled).await;
     }
@@ -1946,8 +1927,9 @@ mod tests {
 
         enginefs.on_stream_start(TEST_HASH, 1).await;
         {
-            enginefs.active_streams.write().await.clear();
-            enginefs.active_file_streams.write().await.clear();
+            let mut state = enginefs.stream_state.write().await;
+            state.active_streams.clear();
+            state.active_file_streams.clear();
         }
         enginefs
             .schedule_torrent_pause_after(TEST_HASH.to_string(), Duration::from_millis(10))
@@ -2015,8 +1997,9 @@ mod tests {
 
         enginefs.refresh_hls_playback(TEST_HASH, 0, "test").await;
         {
-            let mut leases = enginefs.active_playback_leases.write().await;
-            leases
+            let mut state = enginefs.stream_state.write().await;
+            state
+                .active_playback_leases
                 .get_mut(&(TEST_HASH.to_string(), 0))
                 .unwrap()
                 .expires_at_secs = now_secs();

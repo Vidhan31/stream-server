@@ -326,8 +326,7 @@ fn ensure_download_disk_ready(
     let existing_len = root
         .join(file_name)
         .metadata()
-        .map(|metadata| metadata.len().min(file_size))
-        .unwrap_or(0);
+        .map_or(0, |metadata| metadata.len().min(file_size));
     let remaining = file_size.saturating_sub(existing_len);
     let safety_margin = 512 * 1024 * 1024u64;
     let required = if is_partial {
@@ -359,7 +358,7 @@ fn disk_space_check_treats_as_partial(is_download: bool, is_partial: bool) -> bo
     !is_download || is_partial
 }
 
-pub async fn head_stream_video(
+pub(crate) async fn head_stream_video(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((info_hash, requested_idx)): Path<(String, String)>,
@@ -440,17 +439,18 @@ pub async fn head_stream_video(
 
     let content_length = end.saturating_sub(start) + 1;
     let mut res_headers = header::HeaderMap::new();
-    res_headers.insert(
-        header::CONTENT_TYPE,
-        content_type_for_name(name).parse().unwrap(),
-    );
+    let content_type = header::HeaderValue::try_from(content_type_for_name(name))
+        .unwrap_or(header::HeaderValue::from_static("application/octet-stream"));
+    res_headers.insert(header::CONTENT_TYPE, content_type);
     res_headers.insert(header::CONTENT_LENGTH, content_length.into());
-    res_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    if is_partial {
-        res_headers.insert(
-            header::CONTENT_RANGE,
-            format!("bytes {}-{}/{}", start, end, size).parse().unwrap(),
-        );
+    res_headers.insert(
+        header::ACCEPT_RANGES,
+        header::HeaderValue::from_static("bytes"),
+    );
+    if is_partial
+        && let Ok(range_val) = header::HeaderValue::try_from(format!("bytes {start}-{end}/{size}"))
+    {
+        res_headers.insert(header::CONTENT_RANGE, range_val);
     }
     if is_download {
         res_headers.insert(
@@ -476,7 +476,7 @@ pub async fn head_stream_video(
     }
 }
 
-pub async fn stream_video(
+pub(crate) async fn stream_video(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((info_hash, requested_idx)): Path<(String, String)>,
@@ -599,116 +599,125 @@ pub async fn stream_video(
     } else {
         end.saturating_sub(start) + 1
     };
-    if prefer_disk_stream
-        && let Err(err) = ensure_download_disk_ready(
-            &engine_fs.download_dir,
-            &name,
-            size,
-            requested_content_length,
-            disk_space_check_treats_as_partial(is_download, is_partial),
-        )
-    {
-        tracing::warn!(
-            stream_id,
-            info_hash = %info_hash,
-            file_idx = idx,
-            error = %err,
-            "disk-backed stream unavailable; switching this request to memory-only mode"
-        );
-        engine_fs = state.engine.clone();
-        download_storage_mode = "memoryOnlyLowDiskFallback";
+    if prefer_disk_stream {
+        let download_dir = engine_fs.download_dir.clone();
+        let check_name = name.clone();
+        let is_partial_check = disk_space_check_treats_as_partial(is_download, is_partial);
+        let check_res = tokio::task::spawn_blocking(move || {
+            ensure_download_disk_ready(
+                &download_dir,
+                &check_name,
+                size,
+                requested_content_length,
+                is_partial_check,
+            )
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
 
-        engine = if let Some(e) = engine_fs.get_engine(&info_hash).await {
-            tracing::debug!(
-                stream_id,
-                "stream_video fallback memory engine found in cache"
-            );
-            e
-        } else {
-            let trackers = parse_trackers(query_str.as_deref());
-            let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
-            let source = enginefs::backend::TorrentSource::Url(magnet);
-            match engine_fs.add_torrent(source, Some(trackers.clone())).await {
-                Ok(e) => {
-                    tracing::debug!(
-                        stream_id,
-                        "stream_video fallback memory engine created successfully"
-                    );
-                    e
-                }
-                Err(e) => {
-                    tracing::error!(
-                        stream_id,
-                        error = %e,
-                        "stream_video failed to create fallback memory engine"
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to create fallback memory engine: {}", e),
-                    )
-                        .into_response();
-                }
-            }
-        };
-
-        _metadata_resolution = MetadataResolutionGuard::acquire(&engine).await;
-        files = engine.handle.get_files().await;
-        let candidates = files
-            .iter()
-            .enumerate()
-            .map(|(index, file)| compat::FileCandidate {
-                index,
-                name: file.name.clone(),
-                length: file.length,
-            })
-            .collect::<Vec<_>>();
-        idx = match compat::resolve_file_idx(&requested_idx, &candidates, &query.filters) {
-            Ok(idx) => idx,
-            Err(err) => {
-                tracing::warn!(
+        if let Err(err) = check_res {
+            tracing::warn!(
                     stream_id,
                     info_hash = %info_hash,
-                    requested_idx = %requested_idx,
+                    file_idx = idx,
                     error = %err,
-                    "stream_video fallback memory engine could not resolve file index"
-                );
-                return (StatusCode::NOT_FOUND, err).into_response();
-            }
-        };
-        let Some(file_info) = files.get(idx) else {
-            tracing::warn!(
-                stream_id,
-                info_hash = %info_hash,
-                file_idx = idx,
-                "stream_video fallback memory file index not found before stream start"
+                "disk-backed stream unavailable; switching this request to memory-only mode"
             );
-            return (StatusCode::NOT_FOUND, "File not found").into_response();
-        };
-        size = file_info.length;
-        name = file_info.name.clone();
+            engine_fs = state.engine.clone();
+            download_storage_mode = "memoryOnlyLowDiskFallback";
 
-        (start, end, is_partial) = if let Some(range) = &range_header {
-            if let Some((start, end)) = parse_range(range, size) {
-                (start, end, true)
+            engine = if let Some(e) = engine_fs.get_engine(&info_hash).await {
+                tracing::debug!(
+                    stream_id,
+                    "stream_video fallback memory engine found in cache"
+                );
+                e
             } else {
+                let trackers = parse_trackers(query_str.as_deref());
+                let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+                let source = enginefs::backend::TorrentSource::Url(magnet);
+                match engine_fs.add_torrent(source, Some(trackers.clone())).await {
+                    Ok(e) => {
+                        tracing::debug!(
+                            stream_id,
+                            "stream_video fallback memory engine created successfully"
+                        );
+                        e
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stream_id,
+                            error = %e,
+                            "stream_video failed to create fallback memory engine"
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to create fallback memory engine: {}", e),
+                        )
+                            .into_response();
+                    }
+                }
+            };
+
+            _metadata_resolution = MetadataResolutionGuard::acquire(&engine).await;
+            files = engine.handle.get_files().await;
+            let candidates = files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| compat::FileCandidate {
+                    index,
+                    name: file.name.clone(),
+                    length: file.length,
+                })
+                .collect::<Vec<_>>();
+            idx = match compat::resolve_file_idx(&requested_idx, &candidates, &query.filters) {
+                Ok(idx) => idx,
+                Err(err) => {
+                    tracing::warn!(
+                        stream_id,
+                        info_hash = %info_hash,
+                        requested_idx = %requested_idx,
+                        error = %err,
+                        "stream_video fallback memory engine could not resolve file index"
+                    );
+                    return (StatusCode::NOT_FOUND, err).into_response();
+                }
+            };
+            let Some(file_info) = files.get(idx) else {
                 tracing::warn!(
                     stream_id,
                     info_hash = %info_hash,
                     file_idx = idx,
-                    range = %range,
-                    "stream_video fallback memory invalid range header"
+                    "stream_video fallback memory file index not found before stream start"
                 );
-                return (StatusCode::RANGE_NOT_SATISFIABLE, "Range Not Satisfiable")
-                    .into_response();
-            }
-        } else {
-            (0, size.saturating_sub(1), false)
-        };
-        requested_content_length = if size == 0 {
-            0
-        } else {
-            end.saturating_sub(start) + 1
-        };
+                return (StatusCode::NOT_FOUND, "File not found").into_response();
+            };
+            size = file_info.length;
+            name = file_info.name.clone();
+
+            (start, end, is_partial) = if let Some(range) = &range_header {
+                if let Some((start, end)) = parse_range(range, size) {
+                    (start, end, true)
+                } else {
+                    tracing::warn!(
+                        stream_id,
+                        info_hash = %info_hash,
+                        file_idx = idx,
+                        range = %range,
+                        "stream_video fallback memory invalid range header"
+                    );
+                    return (StatusCode::RANGE_NOT_SATISFIABLE, "Range Not Satisfiable")
+                        .into_response();
+                }
+            } else {
+                (0, size.saturating_sub(1), false)
+            };
+            requested_content_length = if size == 0 {
+                0
+            } else {
+                end.saturating_sub(start) + 1
+            };
+        }
     }
     let start_offset_hint = start;
     // Parse priority from enginefs-prio header
@@ -852,15 +861,20 @@ pub async fn stream_video(
             "media file detected"
         );
 
-        res_headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+        let content_type = header::HeaderValue::try_from(mime)
+            .unwrap_or(header::HeaderValue::from_static("application/octet-stream"));
+        res_headers.insert(header::CONTENT_TYPE, content_type);
 
         res_headers.insert(header::CONTENT_LENGTH, content_length.into());
-        res_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-        if is_partial {
-            res_headers.insert(
-                header::CONTENT_RANGE,
-                format!("bytes {}-{}/{}", start, end, size).parse().unwrap(),
-            );
+        res_headers.insert(
+            header::ACCEPT_RANGES,
+            header::HeaderValue::from_static("bytes"),
+        );
+        if is_partial
+            && let Ok(range_val) =
+                header::HeaderValue::try_from(format!("bytes {start}-{end}/{size}"))
+        {
+            res_headers.insert(header::CONTENT_RANGE, range_val);
         }
         if is_download {
             res_headers.insert(

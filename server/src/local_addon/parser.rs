@@ -1,6 +1,22 @@
 use regex::Regex;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
+
+static RE_EXTENSIONS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\.(mkv|avi|mp4|wmv|vp8|mov|mpg|mp3|flac)$").expect("valid regex")
+});
+static RE_MOVIE_KEYWORDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(1080p|720p|480p|blurayrip|brrip|divx|dvdrip|hdrip|hdtv|tvrip|xvid|camrip)")
+        .expect("valid regex")
+});
+static RE_SEASON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)S(\d{1,2})").expect("valid regex"));
+static RE_EPISODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)E(\d{2})").expect("valid regex"));
+static RE_YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(19|20)\d{2}\b").expect("valid regex"));
+static RE_SAMPLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(sample|etrg)").expect("valid regex"));
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VideoMetadata {
@@ -15,38 +31,27 @@ pub struct VideoMetadata {
 }
 
 fn get_extensions() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\.(mkv|avi|mp4|wmv|vp8|mov|mpg|mp3|flac)$").unwrap())
+    &RE_EXTENSIONS
 }
 
 fn get_movie_keywords() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)(1080p|720p|480p|blurayrip|brrip|divx|dvdrip|hdrip|hdtv|tvrip|xvid|camrip)",
-        )
-        .unwrap()
-    })
+    &RE_MOVIE_KEYWORDS
 }
 
 fn get_season_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)S(\d{1,2})").unwrap())
+    &RE_SEASON
 }
 
 fn get_episode_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)E(\d{2})").unwrap())
+    &RE_EPISODE
 }
 
 fn get_year_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b(19|20)\d{2}\b").unwrap())
+    &RE_YEAR
 }
 
 fn get_sample_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)(sample|etrg)").unwrap())
+    &RE_SAMPLE
 }
 
 fn has_episode_prefix(text: &str, episode_start: usize) -> bool {
@@ -63,7 +68,7 @@ fn has_episode_marker(text: &str) -> bool {
     })
 }
 
-pub fn parse_filename(path: &Path) -> Option<VideoMetadata> {
+pub(crate) fn parse_filename(path: &Path) -> Option<VideoMetadata> {
     let filename = path.file_name()?.to_str()?;
     if !get_extensions().is_match(filename) {
         return None;

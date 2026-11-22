@@ -1,6 +1,10 @@
 use fslock::LockFile;
 use stream_server::{ServerConfig, run};
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     let lock_path = std::env::temp_dir().join("stream-server.lock");
     let mut lockfile = LockFile::open(&lock_path)?;

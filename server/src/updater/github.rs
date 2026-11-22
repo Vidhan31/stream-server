@@ -8,7 +8,7 @@ use semver::Version;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct GitHubRelease {
+pub(crate) struct GitHubRelease {
     pub tag_name: String,
     pub html_url: String,
     pub draft: bool,
@@ -24,14 +24,16 @@ pub struct GitHubRelease {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct GitHubAsset {
+pub(crate) struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
     #[serde(default)]
     pub size: u64,
 }
 
-pub async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<GitHubRelease>, UpdateError> {
+pub(crate) async fn fetch_releases(
+    client: &reqwest::Client,
+) -> Result<Vec<GitHubRelease>, UpdateError> {
     let releases = client
         .get("https://api.github.com/repos/perpetus/stream-server/releases")
         .send()
@@ -42,7 +44,7 @@ pub async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<GitHubReleas
     Ok(releases)
 }
 
-pub fn select_latest_candidate(
+pub(crate) fn select_latest_candidate(
     releases: &[GitHubRelease],
     channel: UpdateChannel,
     current: &Version,
@@ -83,8 +85,7 @@ pub fn select_latest_candidate(
 
         let should_replace = selected
             .as_ref()
-            .map(|(selected_version, _)| version > *selected_version)
-            .unwrap_or(true);
+            .is_none_or(|(selected_version, _)| version > *selected_version);
         if should_replace {
             selected = Some((version, candidate));
         }
@@ -102,7 +103,7 @@ pub fn select_latest_candidate(
     }
 }
 
-pub fn make_client() -> Result<reqwest::Client, UpdateError> {
+pub(crate) fn make_client() -> Result<reqwest::Client, UpdateError> {
     reqwest::Client::builder()
         .user_agent(format!(
             "stream-server-updater/{}",

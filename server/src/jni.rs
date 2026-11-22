@@ -3,12 +3,11 @@ use jni::Env;
 use jni::EnvUnowned;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::jstring;
-use once_cell::sync::Lazy;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
-static SERVER_HANDLE: Lazy<Mutex<Option<ServerHandle>>> = Lazy::new(|| Mutex::new(None));
+static SERVER_HANDLE: LazyLock<Mutex<Option<ServerHandle>>> = LazyLock::new(|| Mutex::new(None));
 
 #[cfg(target_os = "android")]
 fn init_android_tls_verifier(env: &mut Env, context: JObject) -> jni::errors::Result<()> {
@@ -60,9 +59,9 @@ pub unsafe extern "C" fn Java_com_stremio_mobile_server_JniStreamingServerContro
             }
         };
 
-        let mut handle_lock = SERVER_HANDLE.lock().unwrap();
-        if handle_lock.is_some() {
-            let bound_addr = handle_lock.as_ref().unwrap().bound_http_addr();
+        let mut handle_lock = SERVER_HANDLE.lock().expect("SERVER_HANDLE lock poisoned");
+        if let Some(handle) = handle_lock.as_ref() {
+            let bound_addr = handle.bound_http_addr();
             let url = format!("http://{}", bound_addr);
             return Ok(env.new_string(url)?.into_raw());
         }
@@ -102,7 +101,7 @@ pub unsafe extern "C" fn Java_com_stremio_mobile_server_JniStreamingServerContro
     _env: EnvUnowned,
     _class: JClass,
 ) {
-    let mut handle_lock = SERVER_HANDLE.lock().unwrap();
+    let mut handle_lock = SERVER_HANDLE.lock().expect("SERVER_HANDLE lock poisoned");
     if let Some(handle) = handle_lock.take() {
         let _ = handle.shutdown();
         let _ = handle.join();
@@ -121,7 +120,7 @@ pub unsafe extern "C" fn Java_com_stremio_mobile_server_JniStreamingServerContro
     _class: JClass,
 ) -> jstring {
     env.with_env(|env| -> jni::errors::Result<jstring> {
-        let handle_lock = SERVER_HANDLE.lock().unwrap();
+        let handle_lock = SERVER_HANDLE.lock().expect("SERVER_HANDLE lock poisoned");
         if let Some(handle) = handle_lock.as_ref() {
             let bound_addr = handle.bound_http_addr();
             let url = format!("http://{}", bound_addr);

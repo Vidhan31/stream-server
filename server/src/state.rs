@@ -23,6 +23,7 @@ pub struct AppState {
     pub local_index: LocalIndex,
     pub archive_cache: Arc<dashmap::DashMap<String, crate::archives::ArchiveSession>>,
     pub devices: Arc<RwLock<Vec<crate::ssdp::Device>>>,
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -85,6 +86,12 @@ impl AppState {
     ) -> Self {
         let settings_path = config_dir.join("settings.json");
         let updater = Arc::new(crate::updater::UpdateManager::new(config_dir.clone()));
+        let http_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         Self {
             engine,
@@ -101,7 +108,34 @@ impl AppState {
             local_index: LocalIndex::new(),
             archive_cache: Arc::new(dashmap::DashMap::new()),
             devices: Arc::new(RwLock::new(Vec::new())),
+            http_client,
         }
+    }
+
+    pub fn prune_expired_archive_sessions(&self) {
+        let now = std::time::Instant::now();
+        let ttl = std::time::Duration::from_hours(2); // 2 hours
+        self.archive_cache.retain(|_key, session| {
+            if now.duration_since(session.last_accessed) > ttl {
+                if session.is_temp {
+                    let path = session.path.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::fs::remove_file(path).await;
+                    });
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    pub fn has_active_archive_sessions(&self) -> bool {
+        let now = std::time::Instant::now();
+        let active_window = std::time::Duration::from_mins(15); // 15 mins
+        self.archive_cache
+            .iter()
+            .any(|entry| now.duration_since(entry.value().last_accessed) < active_window)
     }
 
     pub async fn save_settings(&self) -> anyhow::Result<()> {
@@ -135,7 +169,7 @@ impl AppState {
             // If it's the default value (empty or old default), maybe update it?
             // For now, let's respect the file, but if missing/empty, use our runtime defaults.
             if settings.cache_root.is_empty() {
-                settings.cache_root = defaults.cache_root.clone();
+                settings.cache_root.clone_from(&defaults.cache_root);
             }
             if settings.bt_max_connections == 0
                 || settings.bt_max_connections
@@ -158,13 +192,13 @@ impl AppState {
 
 /// Wrapper for TrackerStorage that bridges sync trait with async AppState
 /// This is created before EngineFS and passed to it for tracker persistence
-pub struct TrackerStorageBridge {
+pub(crate) struct TrackerStorageBridge {
     settings: Arc<RwLock<ServerSettings>>,
     settings_path: PathBuf,
 }
 
 impl TrackerStorageBridge {
-    pub fn new(settings: Arc<RwLock<ServerSettings>>, settings_path: PathBuf) -> Self {
+    pub(crate) fn new(settings: Arc<RwLock<ServerSettings>>, settings_path: PathBuf) -> Self {
         Self {
             settings,
             settings_path,

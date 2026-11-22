@@ -84,7 +84,8 @@ fn find_libtorrent() -> LibtorrentConfig {
             };
         }
         Err(e) => {
-            errors.push_str(&format!("pkg-config: {}\n", e));
+            use std::fmt::Write as _;
+            let _ = writeln!(errors, "pkg-config: {e}");
         }
     }
 
@@ -104,6 +105,7 @@ fn find_libtorrent() -> LibtorrentConfig {
     };
     let triplet_ref = triplet_env.as_deref().unwrap_or(default_triplet);
 
+    // SAFETY: build scripts execute single-threaded before compilation begins.
     unsafe {
         std::env::set_var("VCPKGRS_DYNAMIC", "0");
         std::env::set_var("VCPKGRS_TRIPLET", triplet_ref);
@@ -124,7 +126,8 @@ fn find_libtorrent() -> LibtorrentConfig {
                 };
             }
             Err(e) => {
-                errors.push_str(&format!("vcpkg ({}): {}\n", package, e));
+                use std::fmt::Write as _;
+                let _ = writeln!(errors, "vcpkg ({package}): {e}");
             }
         }
     }
@@ -137,29 +140,31 @@ fn find_libtorrent() -> LibtorrentConfig {
 
         if include_path.exists() {
             // If we found it manually, we also need to tell cargo where the libs are
-            let lib_path = include_path.parent().unwrap().join("lib");
-            if lib_path.exists() {
-                println!("cargo:rustc-link-search=native={}", lib_path.display());
-                println!("cargo:rustc-link-lib=static=torrent-rasterbar");
-                // On Windows, we also need to link with some system libs for boost/vcpkg
-                if target_os == "windows" {
-                    println!("cargo:rustc-link-lib=static=libssl");
-                    println!("cargo:rustc-link-lib=static=libcrypto");
-                    println!("cargo:rustc-link-lib=crypt32");
-                    println!("cargo:rustc-link-lib=user32");
-                    println!("cargo:rustc-link-lib=gdi32");
-                    println!("cargo:rustc-link-lib=advapi32");
-                    println!("cargo:rustc-link-lib=iphlpapi");
-                    println!("cargo:rustc-link-lib=dbghelp");
+            if let Some(parent) = include_path.parent() {
+                let lib_path = parent.join("lib");
+                if lib_path.exists() {
+                    println!("cargo:rustc-link-search=native={}", lib_path.display());
+                    println!("cargo:rustc-link-lib=static=torrent-rasterbar");
+                    // On Windows, we also need to link with some system libs for boost/vcpkg
+                    if target_os == "windows" {
+                        println!("cargo:rustc-link-lib=static=libssl");
+                        println!("cargo:rustc-link-lib=static=libcrypto");
+                        println!("cargo:rustc-link-lib=crypt32");
+                        println!("cargo:rustc-link-lib=user32");
+                        println!("cargo:rustc-link-lib=gdi32");
+                        println!("cargo:rustc-link-lib=advapi32");
+                        println!("cargo:rustc-link-lib=iphlpapi");
+                        println!("cargo:rustc-link-lib=dbghelp");
+                    }
+                    return LibtorrentConfig {
+                        include_paths: vec![include_path],
+                        using_vcpkg: true,
+                        defines: Vec::new(),
+                    };
                 }
-                return LibtorrentConfig {
-                    include_paths: vec![include_path],
-                    using_vcpkg: true,
-                    defines: Vec::new(),
-                };
             }
         }
     }
 
-    panic!("Could not find libtorrent.\nErrors:\n{}", errors);
+    panic!("Could not find libtorrent.\nErrors:\n{errors}");
 }

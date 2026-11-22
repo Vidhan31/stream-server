@@ -7,8 +7,8 @@ use crate::tracker_prober::TrackerProber;
 
 const DEFAULT_TRACKERS_URL: &str =
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt";
-const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // 24 hours
-const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60); // Check every hour
+const REFRESH_INTERVAL: Duration = Duration::from_hours(24); // 24 hours
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_hours(1); // Check every hour
 
 /// Trait for tracker persistence (implemented by AppState or similar)
 /// This allows enginefs to persist trackers without depending on server crate
@@ -73,7 +73,7 @@ impl TrackerManager {
     pub fn new_with_storage(storage: Arc<dyn TrackerStorage>) -> Self {
         let instance = Self {
             trackers: Arc::new(RwLock::new(Vec::new())),
-            storage: Some(storage.clone()),
+            storage: Some(storage),
         };
 
         // Initial load from cache + periodic refresh
@@ -122,13 +122,14 @@ impl TrackerManager {
         let last_updated = storage.get_last_updated();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
 
         let age_secs = now - last_updated;
 
         // Check if trackers are fresh (less than 24 hours old)
-        if age_secs < REFRESH_INTERVAL.as_secs() as i64 {
+        if age_secs < REFRESH_INTERVAL.as_secs().cast_signed() {
             // Ensure we have trackers loaded
             let guard = self.trackers.read().await;
             if !guard.is_empty() {

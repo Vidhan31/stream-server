@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use flate2::read::GzDecoder;
 
-pub struct TgzHandler {
+pub(crate) struct TgzHandler {
     path: PathBuf,
 }
 
 impl TgzHandler {
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }

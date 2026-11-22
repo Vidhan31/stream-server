@@ -96,7 +96,7 @@ impl AsyncRarArchive {
 
     /// Get the path to the archive
     pub fn path(&self) -> Option<&str> {
-        self.inner.as_ref().map(|a| a.path())
+        self.inner.as_ref().map(super::archive::RarArchive::path)
     }
 
     /// Take the inner archive, returning an error if already taken
@@ -105,6 +105,7 @@ impl AsyncRarArchive {
     }
 
     /// Stream an entry's data
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn stream_entry(&mut self, entry_name: String) -> Result<mpsc::Receiver<Vec<u8>>> {
         let mut archive = self.take_inner()?;
         let (tx, rx) = mpsc::channel(32);

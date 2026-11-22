@@ -1,14 +1,14 @@
-pub mod archive;
-pub mod casting;
-pub mod compat;
-pub mod downloader;
-pub mod engine;
-pub mod hls;
+pub(crate) mod archive;
+pub(crate) mod casting;
+pub(crate) mod compat;
+pub(crate) mod downloader;
+pub(crate) mod engine;
+pub(crate) mod hls;
 
-pub mod peers;
-pub mod proxy;
-pub mod stream;
-pub mod subtitles;
-pub mod system;
-pub mod update;
-pub mod youtube;
+pub(crate) mod peers;
+pub(crate) mod proxy;
+pub(crate) mod stream;
+pub(crate) mod subtitles;
+pub(crate) mod system;
+pub(crate) mod update;
+pub(crate) mod youtube;

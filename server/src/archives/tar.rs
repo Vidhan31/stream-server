@@ -6,12 +6,12 @@ use std::task::{Context, Poll};
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 
-pub struct TarHandler {
+pub(crate) struct TarHandler {
     path: PathBuf,
 }
 
 impl TarHandler {
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
@@ -66,7 +66,7 @@ impl ArchiveReader for TarHandler {
     }
 }
 
-pub struct AsyncRawFileSlice {
+pub(crate) struct AsyncRawFileSlice {
     file: File,
     offset: u64,
     size: u64,
@@ -74,7 +74,7 @@ pub struct AsyncRawFileSlice {
 }
 
 impl AsyncRawFileSlice {
-    pub async fn new(path: PathBuf, offset: u64, size: u64) -> Result<Self> {
+    pub(crate) async fn new(path: PathBuf, offset: u64, size: u64) -> Result<Self> {
         let mut file = File::open(path).await?;
         file.seek(tokio::io::SeekFrom::Start(offset)).await?;
         Ok(Self {

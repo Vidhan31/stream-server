@@ -16,8 +16,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub const DEFAULT_HTTP_PORT: u16 = 11470;
 pub const DEFAULT_HTTPS_PORT: u16 = 12470;
 
-pub static GLOBAL_STATE: once_cell::sync::Lazy<std::sync::RwLock<Option<AppState>>> =
-    once_cell::sync::Lazy::new(|| std::sync::RwLock::new(None));
+pub static GLOBAL_STATE: std::sync::LazyLock<std::sync::RwLock<Option<AppState>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
 
 #[cfg(target_os = "android")]
 pub mod jni;
@@ -155,7 +155,7 @@ impl ServerHandle {
 pub fn start(cfg: ServerConfig) -> anyhow::Result<ServerHandle> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let thread_cfg = cfg.clone();
+    let thread_cfg = cfg;
 
     let join = std::thread::Builder::new()
         .name("stream-server".to_string())
@@ -255,8 +255,10 @@ async fn run_inner(
         let log_filter = std::env::var("RUST_LOG")
             .ok()
             .filter(|directives| !directives.trim().is_empty())
-            .map(tracing_subscriber::EnvFilter::new)
-            .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+            .map_or_else(
+                || tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER),
+                tracing_subscriber::EnvFilter::new,
+            );
         let registry = tracing_subscriber::registry().with(log_filter);
         let human_file_layer = tracing_subscriber::fmt::layer()
             .with_writer(human_writer)
@@ -460,6 +462,7 @@ async fn run_inner(
         background_tasks.push(local_addon::scan_background(
             local_files_dir.to_string_lossy().to_string(),
             state.local_index.clone(),
+            state.http_client.clone(),
         ));
     }
 

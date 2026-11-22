@@ -1,5 +1,5 @@
 use crate::archives::ArchiveSession;
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use crate::routes::compat;
 use crate::state::AppState;
 use axum::{
@@ -40,7 +40,7 @@ struct ArchiveCreateRequest {
     file_must_include: Vec<String>,
 }
 
-pub fn router() -> Router<AppState> {
+pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/create",
@@ -55,10 +55,10 @@ pub fn router() -> Router<AppState> {
         .route("/stream/{key}/{*file}", get(stream_content_path))
 }
 
-async fn resolve_path(url: &str) -> Result<PathBuf, StatusCode> {
+async fn resolve_path(client: &reqwest::Client, url: &str) -> Result<(PathBuf, bool), StatusCode> {
     if url.starts_with("http://") || url.starts_with("https://") {
         tracing::info!("Downloading archive from URL: {}", url);
-        let response = reqwest::get(url).await.map_err(|e| {
+        let response = client.get(url).send().await.map_err(|e| {
             tracing::error!("Failed to fetch URL {}: {}", url, e);
             StatusCode::BAD_REQUEST
         })?;
@@ -95,7 +95,7 @@ async fn resolve_path(url: &str) -> Result<PathBuf, StatusCode> {
         }
 
         tracing::info!("Downloaded {} to {:?}", url, path);
-        Ok(path)
+        Ok((path, true))
     } else {
         let path = PathBuf::from(url);
         if !path.exists() {
@@ -103,7 +103,7 @@ async fn resolve_path(url: &str) -> Result<PathBuf, StatusCode> {
             // For torrent relative paths, this function is used by 'create' which assumes local or http.
             return Err(StatusCode::NOT_FOUND);
         }
-        Ok(path)
+        Ok((path, false))
     }
 }
 
@@ -161,7 +161,10 @@ fn parse_create_request(
 
     let request = match payload {
         RawArchivePayload::Array(items) => ArchiveCreateRequest {
-            urls: items.into_iter().filter_map(|i| i.into_url()).collect(),
+            urls: items
+                .into_iter()
+                .filter_map(RawArchiveItem::into_url)
+                .collect(),
             file_idx: None,
             file_must_include: Vec::new(),
         },
@@ -171,8 +174,10 @@ fn parse_create_request(
             file_idx,
             file_must_include,
         } => {
-            let mut resolved_urls: Vec<String> =
-                urls.into_iter().filter_map(|i| i.into_url()).collect();
+            let mut resolved_urls: Vec<String> = urls
+                .into_iter()
+                .filter_map(RawArchiveItem::into_url)
+                .collect();
             if resolved_urls.is_empty()
                 && let Some(u) = url
             {
@@ -228,8 +233,7 @@ async fn select_archive_file(
 
     let requested_idx = request
         .file_idx
-        .map(|idx| idx.to_string())
-        .unwrap_or_else(|| "-1".to_string());
+        .map_or_else(|| "-1".to_string(), |idx| idx.to_string());
     let selected_idx = compat::resolve_file_idx(&requested_idx, &files, &request.file_must_include)
         .map_err(|err| {
             tracing::warn!(error = %err, "failed to resolve archive file");
@@ -290,8 +294,8 @@ async fn create_session_internal(
         return (StatusCode::BAD_REQUEST, "No archive URL provided").into_response();
     };
 
-    let path = match resolve_path(url).await {
-        Ok(path) => path,
+    let (path, is_temp) = match resolve_path(&state.http_client, url).await {
+        Ok(res) => res,
         Err(status) => return (status, "Failed to resolve archive URL").into_response(),
     };
 
@@ -300,12 +304,15 @@ async fn create_session_internal(
         Err(status) => return (status, "Failed to select archive file").into_response(),
     };
 
+    let now = std::time::Instant::now();
     state.archive_cache.insert(
         key.clone(),
         ArchiveSession {
             path,
             selected_file: selected_file.clone(),
-            created: std::time::Instant::now(),
+            created: now,
+            last_accessed: now,
+            is_temp,
         },
     );
 
@@ -386,7 +393,9 @@ async fn stream_file(
         if parts.len() < 2 {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let hash_part = parts[0].strip_prefix("torrent:").unwrap();
+        let Some(hash_part) = parts[0].strip_prefix("torrent:") else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
         // The path part inside the torrent:
         let archive_internal_path = parts.iter().skip(1).copied().collect::<Vec<_>>().join("/");
 
@@ -513,9 +522,13 @@ async fn stream_file(
         };
         drop(settings);
 
-        let session_map = state.archive_cache.clone();
-        let session = session_map.get(key).ok_or(StatusCode::NOT_FOUND)?;
+        let mut session = state
+            .archive_cache
+            .get_mut(key)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        session.last_accessed = std::time::Instant::now();
         let path = session.path.clone();
+        drop(session);
         crate::archives::get_archive_reader_with_config(&path, cache_config)
             .await
             .map_err(|e| {
@@ -585,7 +598,9 @@ async fn stream_file(
         builder = builder.status(StatusCode::OK);
     }
 
-    Ok(builder.body(body).unwrap())
+    builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
