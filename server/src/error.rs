@@ -114,6 +114,7 @@ impl From<enginefs::error::EngineError> for AppError {
             enginefs::error::EngineError::FileIndexOutOfRange { index, max } => {
                 Self::BadRequest(format!("File index {index} out of range (total files: {max})"))
             }
+            enginefs::error::EngineError::InvalidTrack(msg) => Self::BadRequest(msg),
             enginefs::error::EngineError::Timeout(msg) => Self::Timeout(msg),
             other => Self::Internal(anyhow::anyhow!(other)),
         }

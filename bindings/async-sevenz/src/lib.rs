@@ -7,6 +7,7 @@ mod ffi;
 
 use crate::ffi::{ReaderRequest, ReaderResponse, RustReaderContext};
 use std::ffi::{c_void, CStr};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio::sync::mpsc;
 use tokio::task;
@@ -24,14 +25,31 @@ pub struct ArchiveEntry {
     pub index: u32,
 }
 
-pub struct SevenZ {
+struct NativeArchive {
     archive: *mut ffi::SevenZArchive,
     // Context must be kept alive as long as archive uses it
     _context: Box<RustReaderContext>,
 }
 
-// SAFETY: SevenZ exclusively owns its underlying archive pointer and context.
-// Moving SevenZ across threads is safe because ownership transfers completely (Send).
+// SAFETY: NativeArchive uniquely owns the archive handle and context and can be safely transferred between threads.
+unsafe impl Send for NativeArchive {}
+
+impl Drop for NativeArchive {
+    fn drop(&mut self) {
+        if !self.archive.is_null() {
+            // SAFETY: archive is non-null, valid, and dropped only when all references have finished.
+            unsafe {
+                ffi::CloseArchive(self.archive);
+            }
+        }
+    }
+}
+
+pub struct SevenZ {
+    inner: Arc<Mutex<NativeArchive>>,
+}
+
+// SAFETY: SevenZ wraps an Arc<Mutex<NativeArchive>> and can be moved across threads.
 // SevenZ does NOT implement Sync because concurrent calls to C++ 7-Zip FFI would cause data races.
 unsafe impl Send for SevenZ {}
 
@@ -109,22 +127,29 @@ impl SevenZ {
             return Err("Failed to open archive".into());
         }
 
-        Ok(Self {
+        let native = NativeArchive {
             archive,
             _context: context,
+        };
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(native)),
         })
     }
 
     pub async fn entries(
         &mut self,
     ) -> Result<Vec<ArchiveEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        let archive = self.archive;
-        let archive_addr = archive as usize;
+        let inner = Arc::clone(&self.inner);
 
         task::spawn_blocking(move || {
-            // SAFETY: archive_addr is a valid non-null SevenZArchive pointer owned exclusively by this SevenZ instance.
+            let guard = inner
+                .lock()
+                .map_err(|e| format!("Archive mutex poisoned: {e}"))?;
+            let archive = guard.archive;
+
+            // SAFETY: guard holds mutual exclusion on the valid SevenZArchive pointer.
             unsafe {
-                let archive = archive_addr as *mut ffi::SevenZArchive;
                 let count = ffi::GetArchiveItemCount(archive).0;
                 let mut entries = Vec::with_capacity(count as usize);
 
@@ -160,14 +185,17 @@ impl SevenZ {
         &mut self,
         name: &str,
     ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
-        let archive = self.archive;
-        let archive_addr = archive as usize;
+        let inner = Arc::clone(&self.inner);
         let name_c = std::ffi::CString::new(name)?;
 
         task::spawn_blocking(move || {
-            // SAFETY: archive_addr is valid and name_c is a valid null-terminated C string.
+            let guard = inner
+                .lock()
+                .map_err(|e| format!("Archive mutex poisoned: {e}"))?;
+            let archive = guard.archive;
+
+            // SAFETY: archive is valid and name_c is a valid null-terminated C string.
             unsafe {
-                let archive = archive_addr as *mut ffi::SevenZArchive;
                 let idx = ffi::GetArchiveItemIndex(archive, name_c.as_ptr());
                 let idx_val = idx.0;
                 if idx_val >= 0 {
@@ -185,13 +213,16 @@ impl SevenZ {
         &mut self,
         index: u32,
     ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        let archive = self.archive;
-        let archive_addr = archive as usize;
+        let inner = Arc::clone(&self.inner);
 
         task::spawn_blocking(move || {
-            // SAFETY: archive_addr is a valid SevenZArchive pointer.
+            let guard = inner
+                .lock()
+                .map_err(|e| format!("Archive mutex poisoned: {e}"))?;
+            let archive = guard.archive;
+
+            // SAFETY: archive is valid under mutex guard.
             unsafe {
-                let archive = archive_addr as *mut ffi::SevenZArchive;
                 let size = ffi::GetArchiveItemSize(archive, autocxx::c_uint(index));
                 Ok(size.0)
             }
@@ -243,20 +274,23 @@ impl SevenZ {
     where
         W: std::io::Write + Send + 'static,
     {
-        let archive = self.archive;
-        // Since archive is *mut, we cast to usize to pass to blocking task
-        let archive_addr = archive as usize;
+        let inner = Arc::clone(&self.inner);
 
         task::spawn_blocking(move || {
+            let guard = inner
+                .lock()
+                .map_err(|e| format!("Archive mutex poisoned: {e}"))?;
+            let archive = guard.archive;
+
             let mut context = RustWriterContext {
                 writer: Box::new(writer),
             };
             let callback_ctx = (&raw mut context).cast::<autocxx::c_void>();
 
-            // SAFETY: archive_addr is valid and callback_ctx points to stack-allocated RustWriterContext during call.
+            // SAFETY: archive is valid and callback_ctx points to stack-allocated RustWriterContext during call.
             let res = unsafe {
                 ffi::ExtractEntry(
-                    archive_addr as *mut ffi::SevenZArchive,
+                    archive,
                     autocxx::c_uint(index),
                     callback_ctx,
                 )
@@ -269,17 +303,5 @@ impl SevenZ {
             }
         })
         .await?
-    }
-}
-
-impl Drop for SevenZ {
-    fn drop(&mut self) {
-        let archive = self.archive;
-        if !archive.is_null() {
-            // SAFETY: archive is non-null and valid, and being freed exactly once on drop.
-            unsafe {
-                ffi::CloseArchive(archive);
-            }
-        }
     }
 }

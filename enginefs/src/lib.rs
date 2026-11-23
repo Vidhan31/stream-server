@@ -9,7 +9,6 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 pub mod backend;
-pub mod disk_cache;
 pub mod engine;
 pub mod error;
 pub mod files;

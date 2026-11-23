@@ -6,15 +6,13 @@ use tokio::task::{self, JoinHandle};
 use walkdir::WalkDir;
 
 pub(crate) fn scan_background(root: String, index: LocalIndex, client: Client) -> JoinHandle<()> {
-    let root_path = root;
     let index_ref = index;
 
     task::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(128);
 
-        let walk_root = root_path.clone();
         task::spawn_blocking(move || {
-            for entry in WalkDir::new(walk_root)
+            for entry in WalkDir::new(root)
                 .into_iter()
                 .filter_map(std::result::Result::ok)
             {
