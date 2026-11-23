@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Core error type for EngineFS operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum EngineError {
     #[error("Torrent not found: {0}")]
     TorrentNotFound(String),
@@ -34,16 +35,34 @@ pub enum EngineError {
     InvalidTrack(String),
 
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(Arc<std::io::Error>),
 
     #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(Arc<reqwest::Error>),
 
     #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(Arc<serde_json::Error>),
 
     #[error("Internal engine error: {0}")]
     Other(String),
+}
+
+impl From<std::io::Error> for EngineError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(Arc::new(err))
+    }
+}
+
+impl From<reqwest::Error> for EngineError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Network(Arc::new(err))
+    }
+}
+
+impl From<serde_json::Error> for EngineError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(Arc::new(err))
+    }
 }
 
 impl From<anyhow::Error> for EngineError {

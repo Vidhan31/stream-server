@@ -1,6 +1,5 @@
 #![allow(
     unreachable_pub,
-    clippy::undocumented_unsafe_blocks,
     clippy::unwrap_used
 )]
 
@@ -13,8 +12,9 @@ use tokio::sync::mpsc;
 use tokio::task;
 
 // SAFETY: SevenZArchive is owned and transferred between threads safely across await points.
+// SevenZArchive is NOT Sync because concurrent operations on the stateful C++ archive
+// and shared stream reader context would cause data races.
 unsafe impl Send for ffi::SevenZArchive {}
-unsafe impl Sync for ffi::SevenZArchive {}
 
 #[derive(Debug, Clone)]
 pub struct ArchiveEntry {
@@ -30,10 +30,10 @@ pub struct SevenZ {
     _context: Box<RustReaderContext>,
 }
 
-// SAFETY: SevenZ owns its underlying archive pointer and context and can be safely moved
-// and referenced across threads and await boundaries.
+// SAFETY: SevenZ exclusively owns its underlying archive pointer and context.
+// Moving SevenZ across threads is safe because ownership transfers completely (Send).
+// SevenZ does NOT implement Sync because concurrent calls to C++ 7-Zip FFI would cause data races.
 unsafe impl Send for SevenZ {}
-unsafe impl Sync for SevenZ {}
 
 impl SevenZ {
     pub async fn open<R>(mut reader: R) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
@@ -94,9 +94,12 @@ impl SevenZ {
 
         // Call OpenArchive in blocking task
         // We cast the result to usize to make it Send-safe to pass back from spawn_blocking
-        let archive_addr = task::spawn_blocking(move || unsafe {
-            let ptr = ffi::OpenArchive(ffi_ctx_addr as *mut autocxx::c_void);
-            ptr as usize
+        let archive_addr = task::spawn_blocking(move || {
+            // SAFETY: ffi_ctx_addr points to the live Box<RustReaderContext> allocated above.
+            unsafe {
+                let ptr = ffi::OpenArchive(ffi_ctx_addr as *mut autocxx::c_void);
+                ptr as usize
+            }
         })
         .await?;
 
@@ -113,59 +116,65 @@ impl SevenZ {
     }
 
     pub async fn entries(
-        &self,
+        &mut self,
     ) -> Result<Vec<ArchiveEntry>, Box<dyn std::error::Error + Send + Sync>> {
         let archive = self.archive;
         let archive_addr = archive as usize;
 
-        task::spawn_blocking(move || unsafe {
-            let archive = archive_addr as *mut ffi::SevenZArchive;
-            let count = ffi::GetArchiveItemCount(archive).0;
-            let mut entries = Vec::with_capacity(count as usize);
+        task::spawn_blocking(move || {
+            // SAFETY: archive_addr is a valid non-null SevenZArchive pointer owned exclusively by this SevenZ instance.
+            unsafe {
+                let archive = archive_addr as *mut ffi::SevenZArchive;
+                let count = ffi::GetArchiveItemCount(archive).0;
+                let mut entries = Vec::with_capacity(count as usize);
 
-            for i in 0..count {
-                let name_ptr = ffi::GetArchiveItemName(archive, autocxx::c_uint(i));
-                let name = if name_ptr.is_null() {
-                    format!("{i}")
-                } else {
-                    let c_str = CStr::from_ptr(name_ptr);
-                    let s = c_str.to_string_lossy().to_string();
-                    ffi::FreeString(name_ptr);
-                    s
-                };
+                for i in 0..count {
+                    let name_ptr = ffi::GetArchiveItemName(archive, autocxx::c_uint(i));
+                    let name = if name_ptr.is_null() {
+                        format!("{i}")
+                    } else {
+                        let c_str = CStr::from_ptr(name_ptr);
+                        let s = c_str.to_string_lossy().to_string();
+                        ffi::FreeString(name_ptr);
+                        s
+                    };
 
-                let is_dir =
-                    ffi::IsArchiveItemFolder(archive, autocxx::c_uint(i)) != autocxx::c_int(0);
-                let size = ffi::GetArchiveItemSize(archive, autocxx::c_uint(i)).0;
+                    let is_dir =
+                        ffi::IsArchiveItemFolder(archive, autocxx::c_uint(i)) != autocxx::c_int(0);
+                    let size = ffi::GetArchiveItemSize(archive, autocxx::c_uint(i)).0;
 
-                entries.push(ArchiveEntry {
-                    name,
-                    size,
-                    is_dir,
-                    index: i,
-                });
+                    entries.push(ArchiveEntry {
+                        name,
+                        size,
+                        is_dir,
+                        index: i,
+                    });
+                }
+                Ok(entries)
             }
-            Ok(entries)
         })
         .await?
     }
 
     pub async fn get_entry_index(
-        &self,
+        &mut self,
         name: &str,
     ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
         let archive = self.archive;
         let archive_addr = archive as usize;
         let name_c = std::ffi::CString::new(name)?;
 
-        task::spawn_blocking(move || unsafe {
-            let archive = archive_addr as *mut ffi::SevenZArchive;
-            let idx = ffi::GetArchiveItemIndex(archive, name_c.as_ptr());
-            let idx_val = idx.0;
-            if idx_val >= 0 {
-                Ok(Some(idx_val as u32))
-            } else {
-                Ok(None)
+        task::spawn_blocking(move || {
+            // SAFETY: archive_addr is valid and name_c is a valid null-terminated C string.
+            unsafe {
+                let archive = archive_addr as *mut ffi::SevenZArchive;
+                let idx = ffi::GetArchiveItemIndex(archive, name_c.as_ptr());
+                let idx_val = idx.0;
+                if idx_val >= 0 {
+                    Ok(Some(idx_val as u32))
+                } else {
+                    Ok(None)
+                }
             }
         })
         .await?
@@ -173,16 +182,19 @@ impl SevenZ {
 
     /// Get the uncompressed size of an entry by its index
     pub async fn get_entry_size(
-        &self,
+        &mut self,
         index: u32,
     ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let archive = self.archive;
         let archive_addr = archive as usize;
 
-        task::spawn_blocking(move || unsafe {
-            let archive = archive_addr as *mut ffi::SevenZArchive;
-            let size = ffi::GetArchiveItemSize(archive, autocxx::c_uint(index));
-            Ok(size.0)
+        task::spawn_blocking(move || {
+            // SAFETY: archive_addr is a valid SevenZArchive pointer.
+            unsafe {
+                let archive = archive_addr as *mut ffi::SevenZArchive;
+                let size = ffi::GetArchiveItemSize(archive, autocxx::c_uint(index));
+                Ok(size.0)
+            }
         })
         .await?
     }
@@ -206,6 +218,7 @@ pub unsafe extern "C" fn rust_write_cb(
     size: autocxx::c_uint,
     processed: *mut autocxx::c_uint,
 ) -> autocxx::c_int {
+    // SAFETY: Caller contract requires ctx points to a live RustWriterContext and buf has size bytes.
     unsafe {
         let ctx = &mut *ctx.cast::<RustWriterContext>();
         let buf_slice = std::slice::from_raw_parts(buf.cast::<u8>(), size.0 as usize);
@@ -223,7 +236,7 @@ pub unsafe extern "C" fn rust_write_cb(
 
 impl SevenZ {
     pub async fn extract<W>(
-        &self,
+        &mut self,
         index: u32,
         writer: W,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -234,17 +247,20 @@ impl SevenZ {
         // Since archive is *mut, we cast to usize to pass to blocking task
         let archive_addr = archive as usize;
 
-        task::spawn_blocking(move || unsafe {
+        task::spawn_blocking(move || {
             let mut context = RustWriterContext {
                 writer: Box::new(writer),
             };
             let callback_ctx = (&raw mut context).cast::<autocxx::c_void>();
 
-            let res = ffi::ExtractEntry(
-                archive_addr as *mut ffi::SevenZArchive,
-                autocxx::c_uint(index),
-                callback_ctx,
-            );
+            // SAFETY: archive_addr is valid and callback_ctx points to stack-allocated RustWriterContext during call.
+            let res = unsafe {
+                ffi::ExtractEntry(
+                    archive_addr as *mut ffi::SevenZArchive,
+                    autocxx::c_uint(index),
+                    callback_ctx,
+                )
+            };
 
             if res == autocxx::c_int(0) {
                 Ok(())
@@ -260,6 +276,7 @@ impl Drop for SevenZ {
     fn drop(&mut self) {
         let archive = self.archive;
         if !archive.is_null() {
+            // SAFETY: archive is non-null and valid, and being freed exactly once on drop.
             unsafe {
                 ffi::CloseArchive(archive);
             }

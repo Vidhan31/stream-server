@@ -148,7 +148,7 @@ async fn clean_cache(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     // 2. Scan and Evict immediately based on age (30 days)
-    let thirty_days = Duration::from_hours(720);
+    let thirty_days = Duration::from_secs(720 * 3600);
     let now = std::time::SystemTime::now();
 
     let mut files = Vec::new();

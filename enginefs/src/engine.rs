@@ -17,9 +17,9 @@ static RE_SXE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[sS](\d+)[eE](\d+)").expect("valid regex"));
 static RE_XX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)x(\d+)").expect("valid regex"));
 
-type ProbeCell = Arc<OnceCell<Result<crate::hls::ProbeResult, String>>>;
+type ProbeCell = Arc<OnceCell<Result<crate::hls::ProbeResult, EngineError>>>;
 type ProbeInflight = HashMap<usize, ProbeCell>;
-type OpensubHashCell = Arc<OnceCell<Result<String, String>>>;
+type OpensubHashCell = Arc<OnceCell<Result<String, EngineError>>>;
 type OpensubHashInflight = HashMap<usize, OpensubHashCell>;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -94,11 +94,7 @@ impl<H: TorrentHandle> Engine<H> {
             )
         };
         let result = inflight
-            .get_or_init(|| async {
-                self.run_probe(file_idx, fallback_url)
-                    .await
-                    .map_err(|error| format!("{error:#}"))
-            })
+            .get_or_init(|| async { self.run_probe(file_idx, fallback_url).await })
             .await
             .clone();
         {
@@ -110,7 +106,7 @@ impl<H: TorrentHandle> Engine<H> {
                 probes.remove(&file_idx);
             }
         }
-        let res = result.map_err(EngineError::Probe)?;
+        let res = result?;
 
         if res.is_hls_ready() {
             let mut cache = self.probe_cache.lock().await;
@@ -452,8 +448,11 @@ impl<H: TorrentHandle> Engine<H> {
                     self.calculate_opensub_hash(file_idx),
                 )
                 .await
-                .map_err(|_| "OpenSub hash reader timed out after 15 seconds".to_string())?
-                .map_err(|error| format!("{error:#}"))
+                .map_err(|_| {
+                    EngineError::Timeout(
+                        "OpenSub hash reader timed out after 15 seconds".to_string(),
+                    )
+                })?
             })
             .await
             .clone();
@@ -474,7 +473,7 @@ impl<H: TorrentHandle> Engine<H> {
                     .insert(file_idx, hash.clone());
                 Ok(hash)
             }
-            Err(error) => Err(EngineError::Other(error)),
+            Err(error) => Err(error),
         }
     }
 

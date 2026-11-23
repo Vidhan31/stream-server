@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use std::borrow::Cow;
 
 #[derive(Debug, serde::Serialize)]
 pub struct ErrorEnvelope {
@@ -19,7 +20,8 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     RangeNotSatisfiable(String),
-    Unsupported(&'static str),
+    Timeout(String),
+    Unsupported(Cow<'static, str>),
     Internal(anyhow::Error),
 }
 
@@ -36,8 +38,12 @@ impl AppError {
         Self::RangeNotSatisfiable(msg.into())
     }
 
-    pub fn unsupported(feature: &'static str) -> Self {
-        Self::Unsupported(feature)
+    pub fn timeout(msg: impl Into<String>) -> Self {
+        Self::Timeout(msg.into())
+    }
+
+    pub fn unsupported(feature: impl Into<Cow<'static, str>>) -> Self {
+        Self::Unsupported(feature.into())
     }
 
     pub fn internal(err: impl Into<anyhow::Error>) -> Self {
@@ -51,6 +57,7 @@ impl std::fmt::Display for AppError {
             Self::NotFound(msg) => write!(f, "Not found: {msg}"),
             Self::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             Self::RangeNotSatisfiable(msg) => write!(f, "Range not satisfiable: {msg}"),
+            Self::Timeout(msg) => write!(f, "Gateway timeout: {msg}"),
             Self::Unsupported(feature) => write!(f, "Unsupported feature: {feature}"),
             Self::Internal(err) => write!(f, "Internal error: {err}"),
         }
@@ -72,8 +79,9 @@ impl IntoResponse for AppError {
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::RangeNotSatisfiable(msg) => (StatusCode::RANGE_NOT_SATISFIABLE, msg),
+            Self::Timeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg),
             Self::Unsupported(feature) => {
-                tracing::warn!(feature, "Stremio feature is not implemented");
+                tracing::warn!(%feature, "Stremio feature is not implemented");
                 (
                     StatusCode::NOT_IMPLEMENTED,
                     format!("{feature} is not implemented"),
@@ -95,6 +103,20 @@ impl IntoResponse for AppError {
             }),
         )
             .into_response()
+    }
+}
+
+impl From<enginefs::error::EngineError> for AppError {
+    fn from(err: enginefs::error::EngineError) -> Self {
+        match err {
+            enginefs::error::EngineError::TorrentNotFound(msg)
+            | enginefs::error::EngineError::FileNotFound(msg) => Self::NotFound(msg),
+            enginefs::error::EngineError::FileIndexOutOfRange { index, max } => {
+                Self::BadRequest(format!("File index {index} out of range (total files: {max})"))
+            }
+            enginefs::error::EngineError::Timeout(msg) => Self::Timeout(msg),
+            other => Self::Internal(anyhow::anyhow!(other)),
+        }
     }
 }
 

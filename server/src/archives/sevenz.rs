@@ -43,7 +43,7 @@ impl SevenZHandler {
 #[async_trait::async_trait]
 impl ArchiveReader for SevenZHandler {
     async fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let archive = if let Some(path) = &self.path {
+        let mut archive = if let Some(path) = &self.path {
             let file = tokio::fs::File::open(path).await?;
             // async-sevenz expects Unpin + AsyncRead + AsyncSeek
             // tokio::fs::File implements AsyncRead/Seek but not Unpin automatically?
@@ -114,7 +114,7 @@ impl ArchiveReader for SevenZHandler {
 
             // First, get the file size by opening archive and finding the entry
             let file = tokio::fs::File::open(&archive_path).await?;
-            let archive = SevenZ::open(file)
+            let mut archive = SevenZ::open(file)
                 .await
                 .map_err(|e| anyhow!("Failed to open 7z: {}", e))?;
 
@@ -138,7 +138,7 @@ impl ArchiveReader for SevenZHandler {
                 let res: Result<()> = async {
                     // Re-open archive for extraction (the previous one was just for metadata)
                     let file = tokio::fs::File::open(&archive_path).await?;
-                    let archive = SevenZ::open(file)
+                    let mut archive = SevenZ::open(file)
                         .await
                         .map_err(|e| anyhow!("Failed to open 7z: {}", e))?;
 

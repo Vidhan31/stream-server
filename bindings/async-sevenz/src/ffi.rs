@@ -1,4 +1,4 @@
-#![allow(clippy::module_inception)]
+#![allow(clippy::module_inception, clippy::undocumented_unsafe_blocks)]
 
 use autocxx::prelude::*;
 use std::ffi::c_void;

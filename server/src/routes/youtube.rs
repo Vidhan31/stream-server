@@ -22,7 +22,7 @@ use tracing::warn;
 /// Signed googlevideo URLs outlive this comfortably, so a cache hit is always
 /// still playable; the bound exists to keep hovering over a poster from
 /// spawning an extractor process per frame.
-const CACHE_TTL: Duration = Duration::from_mins(30);
+const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Prefer a single file that already carries audio and video. `b` falls back to
 /// the best progressive format when the mp4 variant is missing; formats that
@@ -243,7 +243,7 @@ pub(crate) struct ResolvedStreamResponse<'a> {
     pub is_hls: bool,
     #[serde(rename = "isDashMPD")]
     pub is_dash_mpd: bool,
-    #[serde(rename = "approxDurationMs", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "approxDurationMs")]
     pub approx_duration_ms: Option<String>,
     pub mime_type: &'a str,
 }

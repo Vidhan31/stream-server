@@ -37,8 +37,24 @@ pub(crate) struct PlayerParams {
     pub volume: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<String>,
-    #[serde(rename = "audioTrack", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "audioTrack", alias = "audio_track", skip_serializing_if = "Option::is_none")]
     pub audio_track: Option<usize>,
+}
+
+struct ProcessStream<S> {
+    inner: S,
+    _child: tokio::process::Child,
+}
+
+impl<S: futures_util::Stream + Unpin> futures_util::Stream for ProcessStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +92,7 @@ pub(crate) async fn transcode(Query(params): Query<TranscodeParams>) -> AppResul
     let offset_str = offset.to_string();
 
     let mut cmd = Command::new("ffmpeg");
+    cmd.kill_on_drop(true);
     cmd.args(["-copyts", "-ss", &offset_str, "-i", &video_url])
         .args([
             "-c:v",
@@ -108,7 +125,10 @@ pub(crate) async fn transcode(Query(params): Query<TranscodeParams>) -> AppResul
         .map_err(|e| AppError::internal(anyhow::anyhow!("Failed to spawn ffmpeg: {e}")))?;
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
-    let stream = ReaderStream::new(stdout);
+    let stream = ProcessStream {
+        inner: ReaderStream::new(stdout),
+        _child: child,
+    };
 
     let content_type = if is_fmp4 {
         "video/mp4"

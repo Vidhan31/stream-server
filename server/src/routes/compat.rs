@@ -226,8 +226,7 @@ pub(crate) fn parse_hls_id(id: &str) -> Option<(String, usize)> {
 }
 
 pub(crate) fn unsupported(feature: &str) -> Response {
-    crate::error::AppError::Unsupported(Box::leak(feature.to_string().into_boxed_str()))
-        .into_response()
+    crate::error::AppError::unsupported(feature.to_string()).into_response()
 }
 
 pub(crate) fn empty_ok() -> Response {

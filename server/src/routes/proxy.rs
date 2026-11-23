@@ -16,8 +16,6 @@ static ALLOWED_REQUEST_HEADERS: &[HeaderName] = &[
     header::ACCEPT,
     header::ACCEPT_ENCODING,
     header::ACCEPT_LANGUAGE,
-    header::CONNECTION,
-    header::TRANSFER_ENCODING,
     header::RANGE,
     header::IF_RANGE,
     header::USER_AGENT,
@@ -28,8 +26,6 @@ static ALLOWED_RESPONSE_HEADERS: &[HeaderName] = &[
     header::CONTENT_TYPE,
     header::CONTENT_LENGTH,
     header::CONTENT_RANGE,
-    header::CONNECTION,
-    header::TRANSFER_ENCODING,
     header::LAST_MODIFIED,
     header::ETAG,
     header::SERVER,
@@ -125,7 +121,7 @@ pub(crate) async fn proxy_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let mut req_builder = state.http_client.request(method, target.url.clone());
+    let mut req_builder = state.proxy_http_client.request(method, target.url.clone());
 
     for header_name in ALLOWED_REQUEST_HEADERS {
         if let Some(value) = headers.get(header_name) {
@@ -146,7 +142,19 @@ pub(crate) async fn proxy_handler(
     let mut res_builder = Response::builder().status(status);
 
     let res_headers = response.headers().clone();
+    let content_type = res_headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let is_playlist = target.url.path().ends_with(".m3u8")
+        || target.url.path().ends_with(".m3u")
+        || content_type.contains("mpegurl");
+
     for header_name in ALLOWED_RESPONSE_HEADERS {
+        // Do not forward upstream Content-Length for playlists, as the rewritten playlist body size differs
+        if is_playlist && header_name == header::CONTENT_LENGTH {
+            continue;
+        }
         if let Some(value) = res_headers.get(header_name) {
             res_builder = res_builder.header(header_name.clone(), value);
         }
@@ -161,17 +169,10 @@ pub(crate) async fn proxy_handler(
         .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS")
         .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*");
 
-    let content_type = res_headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let is_playlist = target.url.path().ends_with(".m3u8")
-        || target.url.path().ends_with(".m3u")
-        || content_type.contains("mpegurl");
-
     if is_playlist {
         let body = response.text().await.unwrap_or_default();
         let rewritten = rewrite_playlist(&body, &target.url);
+        res_builder = res_builder.header(header::CONTENT_LENGTH, rewritten.len());
         return match res_builder.body(Body::from(rewritten)) {
             Ok(res) => res.into_response(),
             Err(e) => (

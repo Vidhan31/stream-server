@@ -10,7 +10,6 @@ pub(crate) struct MetaPreview {
     pub id: String,
     pub r#type: String,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub poster: Option<String>,
     pub description: String,
 }
@@ -26,7 +25,6 @@ pub(crate) struct MetaDetail {
     pub r#type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub poster: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

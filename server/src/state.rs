@@ -24,6 +24,7 @@ pub struct AppState {
     pub archive_cache: Arc<dashmap::DashMap<String, crate::archives::ArchiveSession>>,
     pub devices: Arc<RwLock<Vec<crate::ssdp::Device>>>,
     pub http_client: reqwest::Client,
+    pub proxy_http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -87,6 +88,11 @@ impl AppState {
         let settings_path = config_dir.join("settings.json");
         let updater = Arc::new(crate::updater::UpdateManager::new(config_dir.clone()));
         let http_client = reqwest::Client::builder()
+            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let proxy_http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -109,12 +115,13 @@ impl AppState {
             archive_cache: Arc::new(dashmap::DashMap::new()),
             devices: Arc::new(RwLock::new(Vec::new())),
             http_client,
+            proxy_http_client,
         }
     }
 
     pub fn prune_expired_archive_sessions(&self) {
         let now = std::time::Instant::now();
-        let ttl = std::time::Duration::from_hours(2); // 2 hours
+        let ttl = std::time::Duration::from_secs(2 * 3600); // 2 hours
         self.archive_cache.retain(|_key, session| {
             if now.duration_since(session.last_accessed) > ttl {
                 if session.is_temp {
@@ -132,7 +139,7 @@ impl AppState {
 
     pub fn has_active_archive_sessions(&self) -> bool {
         let now = std::time::Instant::now();
-        let active_window = std::time::Duration::from_mins(15); // 15 mins
+        let active_window = std::time::Duration::from_secs(15 * 60); // 15 mins
         self.archive_cache
             .iter()
             .any(|entry| now.duration_since(entry.value().last_accessed) < active_window)

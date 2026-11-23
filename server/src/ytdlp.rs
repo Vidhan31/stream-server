@@ -20,7 +20,7 @@ const PATH_OVERRIDE_ENV: &str = "STREMIO_YTDLP_PATH";
 /// Re-download the managed copy once it is older than this. YouTube breaks
 /// extractors far more often than the server ships, so this is deliberately
 /// shorter than a typical release cycle.
-const REFRESH_AFTER: Duration = Duration::from_hours(168);
+const REFRESH_AFTER: Duration = Duration::from_secs(168 * 3600);
 
 /// Resolution touches the filesystem and the network, so it is serialised: a
 /// burst of trailer hovers would otherwise start one download per request.

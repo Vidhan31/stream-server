@@ -127,18 +127,12 @@ pub(crate) struct StremioProbeStream<'a> {
     pub track: &'a str,
     pub codec: &'a str,
     pub channels: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fps: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<&'a str>,
     pub default: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<&'a str>,
 }
 

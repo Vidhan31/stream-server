@@ -7,8 +7,8 @@ use crate::tracker_prober::TrackerProber;
 
 const DEFAULT_TRACKERS_URL: &str =
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt";
-const REFRESH_INTERVAL: Duration = Duration::from_hours(24); // 24 hours
-const REFRESH_CHECK_INTERVAL: Duration = Duration::from_hours(1); // Check every hour
+const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 3600); // 24 hours
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(3600); // Check every hour
 
 /// Trait for tracker persistence (implemented by AppState or similar)
 /// This allows enginefs to persist trackers without depending on server crate

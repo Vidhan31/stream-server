@@ -1681,19 +1681,24 @@ impl LibtorrentPlaybackCoordinator {
             });
         }
         while let Some(res) = join_set.join_next().await {
-            if let Ok((info_hash, entry, generation, result)) = res {
-                if let Err(error) = result {
-                    tracing::warn!(
-                        info_hash = %info_hash,
-                        generation,
-                        %error,
-                        "Failed to confirm idle libtorrent pause"
-                    );
-                    let mut state = entry.state.lock().await;
-                    if state.generation == generation {
-                        state.phase = LibtorrentNetworkPhase::PausePending;
-                        state.idle_deadline = Some(Instant::now() + PAUSE_RETRY_DELAY);
+            match res {
+                Ok((info_hash, entry, generation, result)) => {
+                    if let Err(error) = result {
+                        tracing::warn!(
+                            info_hash = %info_hash,
+                            generation,
+                            %error,
+                            "Failed to confirm idle libtorrent pause"
+                        );
+                        let mut state = entry.state.lock().await;
+                        if state.generation == generation {
+                            state.phase = LibtorrentNetworkPhase::PausePending;
+                            state.idle_deadline = Some(Instant::now() + PAUSE_RETRY_DELAY);
+                        }
                     }
+                }
+                Err(join_err) => {
+                    tracing::error!(%join_err, "Idle libtorrent pause task panicked or was cancelled");
                 }
             }
         }

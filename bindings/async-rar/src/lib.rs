@@ -5,7 +5,6 @@
 
 #![allow(
     unreachable_pub,
-    clippy::undocumented_unsafe_blocks,
     clippy::unwrap_used
 )]
 //!

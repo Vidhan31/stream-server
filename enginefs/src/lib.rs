@@ -77,8 +77,6 @@ pub struct BackendEngineFS<B: TorrentBackend> {
     pub download_dir: std::path::PathBuf,
     pub stream_state: Arc<RwLock<StreamState>>,
     priority_generation: Arc<AtomicU64>,
-    /// Optional disk cache for persisting completed files
-    _disk_cache: Option<Arc<disk_cache::DiskCacheManager>>,
     /// When false, torrents are paused once their download completes.
     seeding_enabled: Arc<AtomicBool>,
 }
@@ -214,7 +212,6 @@ impl<B: TorrentBackend + 'static> BackendEngineFS<B> {
             download_dir,
             stream_state: Arc::new(RwLock::new(StreamState::default())),
             priority_generation: Arc::new(AtomicU64::new(0)),
-            _disk_cache: None,
             seeding_enabled: Arc::new(AtomicBool::new(true)),
         };
 
@@ -1401,23 +1398,15 @@ impl BackendEngineFS<LibtorrentBackend> {
         tracker_storage: Option<Arc<dyn crate::trackers::TrackerStorage>>,
     ) -> Result<Self> {
         let download_dir = root_dir.join("libtorrent-downloads");
-        let cache_size = config.cache.size;
         let backend = LibtorrentBackend::new(download_dir.clone(), config)?;
 
-        let mut efs = Self::new_with_backend_and_storage(
+        let efs = Self::new_with_backend_and_storage(
             backend,
             HashMap::new(),
             download_dir.clone(),
             download_dir,
             tracker_storage,
         );
-
-        // Set up disk cache for conditional file persistence
-        let disk_cache_dir = root_dir.join("disk-cache");
-        efs._disk_cache = Some(Arc::new(disk_cache::DiskCacheManager::new(
-            disk_cache_dir,
-            cache_size,
-        )));
 
         Ok(efs)
     }

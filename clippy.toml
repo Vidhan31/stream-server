@@ -1,6 +1,6 @@
 # BeautifulRust clippy configuration.
-# Flag any function with a bool parameter, not just functions with four or more.
-max-fn-params-bools = 0
+# Flag functions with two or more bool parameters.
+max-fn-params-bools = 1
 
 # Allow unwrap, expect, and printing in tests, where a panic is the assertion.
 allow-unwrap-in-tests = true

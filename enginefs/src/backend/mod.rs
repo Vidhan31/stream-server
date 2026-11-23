@@ -6,7 +6,6 @@ use priorities::PlaybackIntent;
 
 #[cfg(feature = "libtorrent")]
 #[allow(
-    clippy::all,
     clippy::pedantic,
     clippy::clone_on_ref_ptr,
     clippy::unused_async_trait_impl
